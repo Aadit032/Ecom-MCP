@@ -11,39 +11,72 @@ All data is local and synthetic. No real payments, credentials, frontend, or aut
 ```bash
 bun install
 bun run start
-# → http://0.0.0.0:3000/mcp
-# → http://0.0.0.0:3000/health
-
-bun test
+# → http://127.0.0.1:3000/mcp
+# → http://127.0.0.1:3000/health
 ```
 
 Optional: `PORT` (default `3000`), `HOST` (default `127.0.0.1`).
 
-Point an MCP client at `http://<host>:<port>/mcp`.
+## Testing
 
-## Product boundary
+Two supported ways to verify behavior. Prefer unit tests for policy coverage; use an MCP client for end-to-end tool walks.
 
-| Rule | Behavior |
-|------|----------|
-| Auto-execute | Only when **all** policy checks pass |
-| Policy failure | Create a **manager-approval escalation** and **move no money** |
-| Elicitation | **Not** used to complete a failed-policy refund mid-call |
+### 1. Unit tests (`bun test`)
 
-### Auto-refund policy
+Runs policy eligibility, `issue_refund` auto/escalate/reject paths, store status flips, boundary cases, and manager resolve guards.
 
-All of the following must hold:
+```bash
+bun test
+```
 
-1. Amount ≤ **$150**
-2. Amount ≤ remaining paid balance (paid − already refunded)
-3. Order age ≤ **30 days**
-4. Customer risk **&lt; 70**
-5. **Verified carrier exception** on the shipment
-6. No completed refund for the same `action` + `amount`
-7. Payment captured, **no chargeback/dispute flags**
+Source: `src/policy.test.ts`.
 
-Otherwise `issue_refund` escalates. Money only moves later via `resolve_escalation` with `approve`.
+### 2. MCP client (manual / interactive)
 
-> **`action` is caller-provided scope.** Duplicate detection matches on `action` + `amount`. It only works if the caller uses the **same, stable `action` key** every time for the same refund reason — e.g. always `full_refund_damaged` for a damaged-goods full refund. If the caller varies the key (timestamps, order IDs, free text), every call looks like a new refund and duplicates slip through.
+1. Start the server:
+
+   ```bash
+   bun run start
+   ```
+
+2. Connect an MCP client to the Streamable HTTP endpoint:
+
+   | Client | How |
+   |--------|-----|
+   | **MCP Inspector** | `npx @modelcontextprotocol/inspector` → transport **Streamable HTTP** → URL `http://127.0.0.1:3000/mcp` |
+   | **Claude Desktop / Cursor / VS Code** | Add a remote MCP server pointing at `http://127.0.0.1:3000/mcp` (exact config keys vary by client) |
+
+3. Confirm tools appear (`list_seed_scenarios`, `lookup_*`, `check_refund_eligibility`, `issue_refund`, etc.).
+
+4. Walk scenarios using the matrix below. Suggested flow:
+
+   1. Call **`list_seed_scenarios`** to see order IDs and expected outcomes.
+   2. For a case, **`lookup_order`** / **`lookup_payment`** / **`lookup_shipment`** as needed.
+   3. **`check_refund_eligibility`** (read-only) with `orderId`, `amount`, `action`.
+   4. **`issue_refund`** with the same args plus `reason` — expect `auto_executed` or `escalated`.
+   5. If escalated: **`list_escalations`** or **`get_escalation`**, then **`resolve_escalation`** (`approve` or `reject`, with `resolvedBy`).
+
+Domain state is **in-process and shared** across tool calls for the life of the server process. Restart the server to reset seed data.
+
+#### Case matrix (MCP client)
+
+| # | Order | `amount` | `action` | Expected |
+|---|-------|----------|----------|----------|
+| 1 | `ord_auto_ok` | 89 | `full_refund_damaged` | `auto_executed` |
+| 2 | `ord_over_cap` | 249 | `full_refund_lost` | `escalated` (`amount_cap`) |
+| 3 | `ord_too_old` | 45 | `full_refund_never_delivered` | `escalated` (`order_age`) |
+| 4 | `ord_high_risk` | 39.98 | `full_refund_wrong_item` | `escalated` (`customer_risk`) |
+| 5 | `ord_no_exception` | 64 | `full_refund_damaged` | `escalated` (`carrier_exception`) |
+| 6 | `ord_already_refunded` | 79 | `full_refund_damaged` | `escalated` (`no_duplicate_refund`) |
+| 7 | `ord_chargeback` | 120 | `full_refund_damaged` | `escalated` (`no_chargeback_or_dispute`) |
+| 8 | `ord_partial_ok` | 50 | `full_refund_damaged` | `auto_executed` |
+
+**Escalation round-trip**
+
+1. `issue_refund` on `ord_over_cap` (amount `249`) → note `escalation.id` in the result.
+2. `get_escalation` → `failedChecks` includes `amount_cap`.
+3. `resolve_escalation` with `decision: "approve"`, `resolvedBy: "mgr_jordan"` → refund completes under manager authority.
+4. Repeat the same `issue_refund` → escalates again as a duplicate (money does not move twice).
 
 ## Tools
 
@@ -74,60 +107,21 @@ Otherwise `issue_refund` escalates. Money only moves later via `resolve_escalati
 | `ord_chargeback` | Chargeback flagged | `escalated` |
 | `ord_partial_ok` | $50 of $60 remaining | `auto_executed` |
 
-## Manual testing
+### Auto-refund policy
 
-Two ways to poke the server without the unit tests.
+All of the following must hold:
 
-### Option A — any MCP client
+1. Amount ≤ **$150**
+2. Amount ≤ remaining paid balance (paid − already refunded)
+3. Order age ≤ **30 days**
+4. Customer risk **&lt; 70**
+5. **Verified carrier exception** on the shipment
+6. No completed refund for the same `action` + `amount`
+7. Payment captured, **no chargeback/dispute flags**
 
-1. `bun run start`
-2. Point an MCP client (Claude Desktop, Cursor, VS Code, `npx @modelcontextprotocol/inspector`) at `http://127.0.0.1:3000/mcp`.
-3. Walk the cases below. The server is **stateless**, so each tool call is independent.
+Otherwise `issue_refund` escalates. Money only moves later via `resolve_escalation` with `approve`.
 
-### Option B — raw JSON-RPC via curl
-
-The server needs no session handshake; initialize once (optional) and call tools directly:
-
-```bash
-bun run start
-
-# initialize (optional but standard)
-curl -s -X POST http://127.0.0.1:3000/mcp \
-  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
-
-# call a tool
-curl -s -X POST http://127.0.0.1:3000/mcp \
-  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_seed_scenarios","arguments":{}}}'
-```
-
-To list available tools: `{"method":"tools/list","params":{}}`.
-
-### Case matrix
-
-Read-only: start with `list_seed_scenarios`, then `check_refund_eligibility` per case. Write: `issue_refund`, then find the escalation with `list_escalations` and close it with `resolve_escalation`.
-
-| # | Order | `amount` | `action` | Expected |
-|---|-------|----------|----------|----------|
-| 1 | `ord_auto_ok` | 89 | `full_refund_damaged` | auto-executed, all 8 checks pass |
-| 2 | `ord_over_cap` | 249 | `full_refund_lost` | escalated (`amount_cap`) |
-| 3 | `ord_too_old` | 45 | `full_refund_never_delivered` | escalated (`order_age`) |
-| 4 | `ord_high_risk` | 39.98 | `full_refund_wrong_item` | escalated (`customer_risk`, score 82) |
-| 5 | `ord_no_exception` | 64 | `full_refund_damaged` | escalated (`carrier_exception`) |
-| 6 | `ord_already_refunded` | 79 | `full_refund_damaged` | escalated (`no_duplicate_refund` — same action+amount as seed) |
-| 7 | `ord_chargeback` | 120 | `full_refund_damaged` | escalated (`no_chargeback_or_dispute`) |
-| 8 | `ord_partial_ok` | 50 | `full_refund_damaged` | auto-executed ($60 left after seed's $40 refund) |
-
-**Duplicate-scope demo** (proves `action` matters):
-- `ord_already_refunded`, 79, `full_refund_damaged` → **blocked** (duplicate).
-- `ord_already_refunded`, 79, `full_refund_damaged_v2` → passes duplicate check (but still escalates via other guards if any fail — try a clean order for a pure demo).
-
-**Escalation round-trip:**
-- Call `issue_refund` on `ord_over_cap` (249) → get `escalation.id` from the result.
-- `get_escalation` → shows `failedChecks: ["amount_cap"]`.
-- `resolve_escalation` with `decision: "approve"`, `resolvedBy: "mgr_jordan"` → refund completes under manager authority.
-- Call `issue_refund` on the same order with the same action+amount again → escalated again as duplicate (proves money only moves once).
+> **`action` is caller-provided scope.** Duplicate detection matches on `action` + `amount`. Use the same stable key for the same refund reason (e.g. always `full_refund_damaged`). If the key changes every call, duplicates will not be blocked.
 
 ## Layout
 
@@ -135,11 +129,12 @@ Read-only: start with `list_seed_scenarios`, then `check_refund_eligibility` per
 index.ts              # Express + Streamable HTTP
 src/
   create-server.ts    # Tool registration
+  tool-schemas.ts     # Shared Zod input schemas
   types.ts            # Domain types + policy constants
   seed.ts             # Synthetic catalog
   store.ts            # In-memory store
   policy.ts           # Eligibility + issue/resolve
-  policy.test.ts
+  policy.test.ts      # Unit tests
 ```
 
 ## Assumptions

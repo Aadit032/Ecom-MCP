@@ -182,5 +182,5 @@ function roundMoney(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-/** Process-wide default store (stdio server). Tests should construct their own. */
+/** Process-wide default store. Tests should construct their own Store instances. */
 export const store = new Store();

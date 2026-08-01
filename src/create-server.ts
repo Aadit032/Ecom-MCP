@@ -7,6 +7,18 @@ import { z } from "zod";
 import { checkEligibility, issueRefund, resolveEscalation } from "./policy.ts";
 import { SEED_SCENARIOS } from "./seed.ts";
 import { store } from "./store.ts";
+import {
+  checkRefundEligibilityInput,
+  getEscalationInput,
+  issueRefundInput,
+  listEscalationsInput,
+  listRefundsInput,
+  lookupCustomerInput,
+  lookupOrderInput,
+  lookupPaymentInput,
+  lookupShipmentInput,
+  resolveEscalationInput,
+} from "./tool-schemas.ts";
 import { POLICY } from "./types.ts";
 
 export const SERVER_NAME = "ecom-refund-copilot";
@@ -69,9 +81,7 @@ export function createRefundMcpServer(): McpServer {
     {
       title: "Lookup order",
       description:"Look up a synthetic order by order ID, including linked customer summary.",
-      inputSchema: z.object({
-        orderId: z.string().describe("Order ID, e.g. ord_auto_ok"),
-      }),
+      inputSchema: lookupOrderInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ orderId }) => {
@@ -87,16 +97,7 @@ export function createRefundMcpServer(): McpServer {
       title: "Lookup payment",
       description:
         "Look up payment by payment ID or order ID. Includes amount paid, amount already refunded, and chargeback/dispute flags.",
-      inputSchema: z.object({
-        paymentId: z
-          .string()
-          .optional()
-          .describe("Payment ID, e.g. pay_auto_ok"),
-        orderId: z
-          .string()
-          .optional()
-          .describe("Order ID if payment ID unknown"),
-      }),
+      inputSchema: lookupPaymentInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ paymentId, orderId }) => {
@@ -122,16 +123,7 @@ export function createRefundMcpServer(): McpServer {
       title: "Lookup shipment",
       description:
         "Look up shipment by shipment ID or order ID. Includes carrier exception type and whether it is verified (required for auto-refund).",
-      inputSchema: z.object({
-        shipmentId: z
-          .string()
-          .optional()
-          .describe("Shipment ID, e.g. shp_auto_ok"),
-        orderId: z
-          .string()
-          .optional()
-          .describe("Order ID if shipment ID unknown"),
-      }),
+      inputSchema: lookupShipmentInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ shipmentId, orderId }) => {
@@ -155,9 +147,7 @@ export function createRefundMcpServer(): McpServer {
       title: "Lookup customer",
       description:
         "Look up a customer by ID, including risk score used by policy.",
-      inputSchema: z.object({
-        customerId: z.string().describe("Customer ID, e.g. cust_low_risk"),
-      }),
+      inputSchema: lookupCustomerInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ customerId }) => {
@@ -172,9 +162,7 @@ export function createRefundMcpServer(): McpServer {
       title: "List refunds for order",
       description:
         "List existing refund records for an order (completed or otherwise).",
-      inputSchema: z.object({
-        orderId: z.string().describe("Order ID"),
-      }),
+      inputSchema: listRefundsInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ orderId }) => {
@@ -204,16 +192,7 @@ Auto-execute requires ALL of:
 - payment captured with no chargeback/dispute flags
 
 If any check fails, issue_refund will escalate for manager approval instead of refunding.`,
-      inputSchema: z.object({
-        orderId: z.string().describe("Order ID to evaluate"),
-        amount: z.number().positive().describe("Requested refund amount in USD"),
-        action: z
-          .string()
-          .min(1)
-          .describe(
-            "Stable action key for duplicate detection, e.g. full_refund_damaged",
-          ),
-      }),
+      inputSchema: checkRefundEligibilityInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ orderId, amount, action }) => {
@@ -235,18 +214,7 @@ Behavior:
   Failed checks never complete the refund via mid-call human confirmation/elicitation.
 
 Use check_refund_eligibility first for investigation. Use resolve_escalation after a manager reviews a pending escalation.`,
-      inputSchema: z.object({
-        orderId: z.string().describe("Order ID"),
-        amount: z.number().positive().describe("Refund amount in USD"),
-        action: z
-          .string()
-          .min(1)
-          .describe("Stable action key, e.g. full_refund_damaged"),
-        reason: z
-          .string()
-          .min(1)
-          .describe("Human-readable refund reason for audit"),
-      }),
+      inputSchema: issueRefundInput,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -267,12 +235,7 @@ Use check_refund_eligibility first for investigation. Use resolve_escalation aft
       title: "List escalations",
       description:
         "List manager-approval escalations created when issue_refund could not auto-execute. Optionally filter by status.",
-      inputSchema: z.object({
-        status: z
-          .enum(["pending", "approved", "rejected"])
-          .optional()
-          .describe("Optional status filter"),
-      }),
+      inputSchema: listEscalationsInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ status }) => {
@@ -285,9 +248,7 @@ Use check_refund_eligibility first for investigation. Use resolve_escalation aft
       title: "Get escalation",
       description:
         "Fetch a single escalation by ID, including failed policy checks.",
-      inputSchema: z.object({
-        escalationId: z.string().describe("Escalation ID, e.g. esc_1001"),
-      }),
+      inputSchema: getEscalationInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ escalationId }) => {
@@ -307,15 +268,7 @@ Use check_refund_eligibility first for investigation. Use resolve_escalation aft
       - reject: close the escalation without moving money.
 
       This is the only path that may complete a refund that failed auto-policy checks.`,
-      inputSchema: z.object({
-        escalationId: z.string().describe("Pending escalation ID"),
-        decision: z.enum(["approve", "reject"]),
-        resolvedBy: z
-          .string()
-          .min(1)
-          .describe("Manager identifier, e.g. mgr_jordan"),
-        note: z.string().optional().describe("Optional resolution note"),
-      }),
+      inputSchema: resolveEscalationInput,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
