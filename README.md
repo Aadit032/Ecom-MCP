@@ -11,11 +11,11 @@ All data is local and synthetic. No real payments, credentials, frontend, or aut
 ```bash
 bun install
 bun run start
-# → http://127.0.0.1:3000/mcp
-# → http://127.0.0.1:3000/health
+# → http://localhost:3000/mcp
+# → http://localhost:3000/health
 ```
 
-Optional: `PORT` (default `3000`), `HOST` (default `127.0.0.1`).
+Optional: `PORT` (default `3000`), `HOST` (default `0.0.0.0`).
 
 ## Testing
 
@@ -43,8 +43,8 @@ Source: `src/policy.test.ts`.
 
    | Client | How |
    |--------|-----|
-   | **MCP Inspector** | `npx @modelcontextprotocol/inspector` → transport **Streamable HTTP** → URL `http://127.0.0.1:3000/mcp` |
-   | **Claude Desktop / Cursor / VS Code** | Add a remote MCP server pointing at `http://127.0.0.1:3000/mcp` (exact config keys vary by client) |
+   | **MCP Inspector** | `npx @modelcontextprotocol/inspector` → transport **Streamable HTTP** → URL `http://localhost:3000/mcp` |
+   | **Claude Desktop / Cursor / VS Code** | Add a remote MCP server pointing at `http://localhost:3000/mcp` (exact config keys vary by client) |
 
 3. Confirm tools appear (`list_seed_scenarios`, `lookup_*`, `check_refund_eligibility`, `issue_refund`, etc.).
 
