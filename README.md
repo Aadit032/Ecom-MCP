@@ -48,7 +48,7 @@ Source: `src/policy.test.ts`.
 
 3. Confirm tools appear (`list_seed_scenarios`, `lookup_*`, `check_refund_eligibility`, `issue_refund`, etc.).
 
-4. Walk scenarios using the matrix below. Suggested flow:
+4. Ask natural-language prompts from **[TEST_QUESTIONS.md](./TEST_QUESTIONS.md)** (questions + expected results for AI-client review). Suggested flow:
 
    1. Call **`list_seed_scenarios`** to see order IDs and expected outcomes.
    2. For a case, **`lookup_order`** / **`lookup_payment`** / **`lookup_shipment`** as needed.
