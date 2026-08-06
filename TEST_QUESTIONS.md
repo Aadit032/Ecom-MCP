@@ -1,12 +1,18 @@
 # MCP Client Test Questions
 
-Connect your AI client to the Streamable HTTP endpoint (`http://localhost:3000/mcp` after `bun run start`). Ask these naturally; the agent should call MCP tools. Restart the server before a full pass so seed state is clean.
+Connect your AI client to the Streamable HTTP endpoint (`http://localhost:3000/mcp` after `bun run start`). Ask these naturally; the agent should call MCP tools. Before a full pass, call **`reset_seed_data`** (or restart the server) so seed state is clean.
 
 **Policy (auto-refund needs all of these):** amount ≤ $150 · amount ≤ remaining balance · order ≤ 30 days · customer risk &lt; 70 · verified carrier exception · no duplicate action+amount · payment captured · no chargeback/dispute.
 
 ---
 
 ## Discovery & investigation
+
+### 0. Reset seed data (between runs)
+
+**Ask:** Reset the synthetic seed data so all scenarios match the original catalog.
+
+**Expect:** Store reloaded; counts for customers/orders/payments/shipments; escalations cleared (except none in seed); pre-seeded refunds restored (e.g. on `ord_already_refunded`, `ord_partial_ok`).
 
 ### 1. List scenarios
 
@@ -127,11 +133,11 @@ Connect your AI client to the Streamable HTTP endpoint (`http://localhost:3000/m
 
 **Expect:** Pending entry with `requestedAmount: 249` and failed check **`amount_cap`**.
 
-### 19. Manager approve
+### 19. Manager approve does **not** bypass policy
 
 **Ask:** Approve the pending escalation for `ord_over_cap` as manager `mgr_jordan`.
 
-**Expect:** Escalation **approved**; refund completes under manager authority.
+**Expect:** **Blocked** — full policy re-check at execution time still fails (`amount_cap`). Escalation remains **pending**; **no money moved**. Escalation is not authorization to override the cap. Exception refunds (if any) stay outside the automated MCP path.
 
 ### 20. Manager reject
 
@@ -141,19 +147,27 @@ Connect your AI client to the Streamable HTTP endpoint (`http://localhost:3000/m
 
 **Expect:** Escalation **rejected**; **no money moved**.
 
-### 21. No double payout
+### 21. Over-cap still not auto-payable after blocked approve
 
-**Setup:** After Q16 + Q19 (over-cap approved and refunded).
+**Setup:** After Q16 + Q19 (over-cap escalated; approve attempted and blocked).
 
 **Ask:** Issue the same refund again for `ord_over_cap` ($249, `full_refund_lost`).
 
-**Expect:** Does **not** auto-execute a second full refund; escalates again (duplicate / balance guards).
+**Expect:** Still **not** auto-executed; escalates again (or remains blocked by policy). Money has not moved from the prior approve attempt.
+
+### 22. Approve succeeds only when conditions clear
+
+**Setup:** Fresh server. Issue a refund that escalates only on risk (e.g. fixture-style high risk that can be lowered — or use client tools if your demo environment can refresh risk). For unit-level behavior: risk fails → escalate → risk drops below 70 → approve.
+
+**Ask (conceptual):** After risk is below 70 and all other gates pass, approve the pending escalation.
+
+**Expect:** Full re-check passes → escalation **approved** → refund completes → money moved. If any gate still fails, same as Q19 (blocked, pending, no money).
 
 ---
 
 ## Optional end-to-end prompt
 
-### 22. Full agent flow
+### 23. Full agent flow
 
 **Ask:** Customer on `ord_auto_ok` wants a full refund for damaged earbuds. Investigate, check policy, and only issue if auto-eligible.
 

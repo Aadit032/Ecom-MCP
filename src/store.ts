@@ -32,7 +32,7 @@ export class Store {
     this.reset();
   }
 
-  /** Reset to the seeded synthetic catalog. Used by tests. */
+  /** Reset to the seeded synthetic catalog. Used by tests and the reset_seed_data MCP tool. */
   reset(): void {
     const data = seedData();
     this.customers = new Map(data.customers.map((c) => [c.id, structuredClone(c)]));

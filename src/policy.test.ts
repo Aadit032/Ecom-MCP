@@ -836,7 +836,7 @@ describe("resolveEscalation", () => {
     store = new Store();
   });
 
-  test("manager approve completes refund after policy escalation", () => {
+  test("approve does not bypass still-failing policy (amount_cap) — no money moved", () => {
     const issued = issueRefund(
       store,
       {
@@ -849,19 +849,73 @@ describe("resolveEscalation", () => {
     );
     expect(issued.outcome).toBe("escalated");
     const escId = issued.escalation!.id;
+    const refundedBefore = store.getPaymentByOrder("ord_over_cap")!.amountRefunded;
 
-    const resolved = resolveEscalation(store, {
-      escalationId: escId,
-      decision: "approve",
-      resolvedBy: "mgr_jordan",
-      note: "Verified with carrier claims team",
+    const resolved = resolveEscalation(
+      store,
+      {
+        escalationId: escId,
+        decision: "approve",
+        resolvedBy: "mgr_jordan",
+        note: "Want to refund despite cap",
+      },
+      NOW,
+    );
+
+    expect(resolved.ok).toBe(false);
+    expect(resolved.refund).toBeNull();
+    expect(resolved.eligibility).not.toBeNull();
+    expect(failedCodes(resolved.eligibility!)).toContain("amount_cap");
+    // Escalation is not authorization to bypass — stays pending for retry/outside process
+    expect(store.getEscalation(escId)!.status).toBe("pending");
+    expect(store.getPaymentByOrder("ord_over_cap")!.amountRefunded).toBe(
+      refundedBefore,
+    );
+    expect(resolved.message.toLowerCase()).toContain("policy still fails");
+  });
+
+  test("approve completes refund only after full policy re-check passes", () => {
+    installFixture(store, {
+      orderId: "ord_risk_then_clear",
+      payment: { amountPaid: 80, amountRefunded: 0 },
+      customer: { id: "cust_risk_clear", riskScore: 90 },
     });
+
+    const issued = issueRefund(
+      store,
+      {
+        orderId: "ord_risk_then_clear",
+        amount: 50,
+        action: "full_refund_damaged",
+        reason: "Damaged; high risk at open",
+      },
+      NOW,
+    );
+    expect(issued.outcome).toBe("escalated");
+    const escId = issued.escalation!.id;
+
+    // Underlying condition clears (e.g. risk provider refresh) before manager approve
+    store.customers.get("cust_risk_clear")!.riskScore = 20;
+
+    const resolved = resolveEscalation(
+      store,
+      {
+        escalationId: escId,
+        decision: "approve",
+        resolvedBy: "mgr_jordan",
+        note: "Risk refreshed; conditions clear",
+      },
+      NOW,
+    );
 
     expect(resolved.ok).toBe(true);
     expect(resolved.refund).not.toBeNull();
     expect(resolved.refund!.autoApproved).toBe(false);
     expect(resolved.refund!.escalationId).toBe(escId);
-    expect(store.getPaymentByOrder("ord_over_cap")!.amountRefunded).toBe(249);
+    expect(resolved.eligibility!.eligibleForAutoRefund).toBe(true);
+    expect(store.getPaymentByOrder("ord_risk_then_clear")!.amountRefunded).toBe(
+      50,
+    );
     expect(store.getEscalation(escId)!.status).toBe("approved");
   });
 
@@ -878,15 +932,20 @@ describe("resolveEscalation", () => {
     );
     const escId = issued.escalation!.id;
 
-    const resolved = resolveEscalation(store, {
-      escalationId: escId,
-      decision: "reject",
-      resolvedBy: "mgr_sam",
-      note: "No exception; deny goodwill",
-    });
+    const resolved = resolveEscalation(
+      store,
+      {
+        escalationId: escId,
+        decision: "reject",
+        resolvedBy: "mgr_sam",
+        note: "No exception; deny goodwill",
+      },
+      NOW,
+    );
 
     expect(resolved.ok).toBe(true);
     expect(resolved.refund).toBeNull();
+    expect(resolved.eligibility).toBeNull();
     expect(store.getPaymentByOrder("ord_no_exception")!.amountRefunded).toBe(0);
     expect(store.getEscalation(escId)!.status).toBe("rejected");
   });
@@ -900,10 +959,11 @@ describe("resolveEscalation", () => {
     expect(resolved.ok).toBe(false);
     expect(resolved.escalation).toBeNull();
     expect(resolved.refund).toBeNull();
+    expect(resolved.eligibility).toBeNull();
     expect(resolved.message).toContain("not found");
   });
 
-  test("cannot resolve the same escalation twice", () => {
+  test("cannot resolve the same escalation twice after reject", () => {
     const issued = issueRefund(
       store,
       {
@@ -931,11 +991,10 @@ describe("resolveEscalation", () => {
     expect(store.getPaymentByOrder("ord_too_old")!.amountRefunded).toBe(0);
   });
 
-  test("approve fails when remaining balance became insufficient while pending", () => {
+  test("approve blocked (not auto-closed) when remaining balance insufficient while pending", () => {
     installFixture(store, {
       orderId: "ord_race_balance",
       payment: { amountPaid: 100, amountRefunded: 0 },
-      // Force escalate via high risk so we can approve later
       customer: { id: "cust_race", riskScore: 90 },
     });
 
@@ -952,7 +1011,6 @@ describe("resolveEscalation", () => {
     expect(issued.outcome).toBe("escalated");
     const escId = issued.escalation!.id;
 
-    // Another refund eats the balance while escalation is pending
     store.recordCompletedRefund({
       orderId: "ord_race_balance",
       paymentId: `pay_ord_race_balance`,
@@ -964,23 +1022,30 @@ describe("resolveEscalation", () => {
     });
     // remaining = 50, escalation wants 80
 
-    const resolved = resolveEscalation(store, {
-      escalationId: escId,
-      decision: "approve",
-      resolvedBy: "mgr_race",
-    });
+    // Clear risk so only not_over_paid (and not risk) blocks if we only cared about risk —
+    // full re-check should still fail on balance.
+    store.customers.get("cust_race")!.riskScore = 10;
+
+    const resolved = resolveEscalation(
+      store,
+      {
+        escalationId: escId,
+        decision: "approve",
+        resolvedBy: "mgr_race",
+      },
+      NOW,
+    );
 
     expect(resolved.ok).toBe(false);
     expect(resolved.refund).toBeNull();
-    expect(store.getEscalation(escId)!.status).toBe("rejected");
-    expect(resolved.message.toLowerCase()).toContain("remaining");
-    // intervening $50 only — approve path did not add $80
+    expect(store.getEscalation(escId)!.status).toBe("pending");
+    expect(failedCodes(resolved.eligibility!)).toContain("not_over_paid");
     expect(store.getPaymentByOrder("ord_race_balance")!.amountRefunded).toBe(
       50,
     );
   });
 
-  test("approve fails when a duplicate refund appeared while pending", () => {
+  test("approve blocked when a duplicate refund appeared while pending", () => {
     installFixture(store, {
       orderId: "ord_race_dupe",
       payment: { amountPaid: 100, amountRefunded: 0 },
@@ -1000,7 +1065,6 @@ describe("resolveEscalation", () => {
     expect(issued.outcome).toBe("escalated");
     const escId = issued.escalation!.id;
 
-    // Same action+amount completed by another path while pending
     store.recordCompletedRefund({
       orderId: "ord_race_dupe",
       paymentId: "pay_ord_race_dupe",
@@ -1011,21 +1075,27 @@ describe("resolveEscalation", () => {
       escalationId: null,
     });
 
-    const resolved = resolveEscalation(store, {
-      escalationId: escId,
-      decision: "approve",
-      resolvedBy: "mgr_dupe",
-    });
+    store.customers.get("cust_dupe")!.riskScore = 10;
+
+    const resolved = resolveEscalation(
+      store,
+      {
+        escalationId: escId,
+        decision: "approve",
+        resolvedBy: "mgr_dupe",
+      },
+      NOW,
+    );
 
     expect(resolved.ok).toBe(false);
     expect(resolved.refund).toBeNull();
-    expect(store.getEscalation(escId)!.status).toBe("rejected");
-    expect(resolved.message.toLowerCase()).toContain("duplicate");
+    expect(store.getEscalation(escId)!.status).toBe("pending");
+    expect(failedCodes(resolved.eligibility!)).toContain("no_duplicate_refund");
     // Only the intervening $40, not a second $40
     expect(store.getPaymentByOrder("ord_race_dupe")!.amountRefunded).toBe(40);
   });
 
-  test("approve fails when payment record disappeared", () => {
+  test("approve blocked when payment record disappeared", () => {
     installFixture(store, {
       orderId: "ord_pay_gone",
       customer: { id: "cust_gone", riskScore: 99 },
@@ -1043,13 +1113,53 @@ describe("resolveEscalation", () => {
     const escId = issued.escalation!.id;
     store.payments.delete("pay_ord_pay_gone");
 
-    const resolved = resolveEscalation(store, {
-      escalationId: escId,
-      decision: "approve",
-      resolvedBy: "mgr",
-    });
+    const resolved = resolveEscalation(
+      store,
+      {
+        escalationId: escId,
+        decision: "approve",
+        resolvedBy: "mgr",
+      },
+      NOW,
+    );
     expect(resolved.ok).toBe(false);
-    expect(resolved.message).toContain("missing");
     expect(resolved.refund).toBeNull();
+    expect(store.getEscalation(escId)!.status).toBe("pending");
+    // Full re-check surfaces missing payment / related checks
+    expect(resolved.eligibility).not.toBeNull();
+    expect(resolved.eligibility!.eligibleForAutoRefund).toBe(false);
+  });
+
+  test("approve still blocked for chargeback even if manager approves", () => {
+    const issued = issueRefund(
+      store,
+      {
+        orderId: "ord_chargeback",
+        amount: 120,
+        action: "full_refund_damaged",
+        reason: "Despite chargeback",
+      },
+      NOW,
+    );
+    expect(issued.outcome).toBe("escalated");
+    const escId = issued.escalation!.id;
+
+    const resolved = resolveEscalation(
+      store,
+      {
+        escalationId: escId,
+        decision: "approve",
+        resolvedBy: "mgr_override",
+      },
+      NOW,
+    );
+
+    expect(resolved.ok).toBe(false);
+    expect(resolved.refund).toBeNull();
+    expect(failedCodes(resolved.eligibility!)).toContain(
+      "no_chargeback_or_dispute",
+    );
+    expect(store.getPaymentByOrder("ord_chargeback")!.amountRefunded).toBe(0);
+    expect(store.getEscalation(escId)!.status).toBe("pending");
   });
 });

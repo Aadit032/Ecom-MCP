@@ -54,9 +54,9 @@ Source: `src/policy.test.ts`.
    2. For a case, **`lookup_order`** / **`lookup_payment`** / **`lookup_shipment`** as needed.
    3. **`check_refund_eligibility`** (read-only) with `orderId`, `amount`, `action`.
    4. **`issue_refund`** with the same args plus `reason` — expect `auto_executed` or `escalated`.
-   5. If escalated: **`list_escalations`** or **`get_escalation`**, then **`resolve_escalation`** (`approve` or `reject`, with `resolvedBy`).
+   5. If escalated: **`list_escalations`** or **`get_escalation`**, then **`resolve_escalation`** (`reject`, or `approve` only when conditions can pass a full re-check).
 
-Domain state is **in-process and shared** across tool calls for the life of the server process. Restart the server to reset seed data.
+Domain state is **in-process and shared** across tool calls for the life of the server process. Call **`reset_seed_data`** between test runs to restore the seed catalog without restarting (or restart the server).
 
 #### Case matrix (MCP client)
 
@@ -75,13 +75,15 @@ Domain state is **in-process and shared** across tool calls for the life of the 
 
 1. `issue_refund` on `ord_over_cap` (amount `249`) → note `escalation.id` in the result.
 2. `get_escalation` → `failedChecks` includes `amount_cap`.
-3. `resolve_escalation` with `decision: "approve"`, `resolvedBy: "mgr_jordan"` → refund completes under manager authority.
-4. Repeat the same `issue_refund` → escalates again as a duplicate (money does not move twice).
+3. `resolve_escalation` with `decision: "approve"`, `resolvedBy: "mgr_jordan"` → **blocked**: full policy re-check still fails (`amount_cap`); escalation stays **pending**; **no money moved**. Escalation is not a policy override.
+4. `resolve_escalation` with `decision: "reject"` on another pending case (e.g. `ord_too_old`) → closed; no money moved.
+5. Optional: after an underlying condition clears (e.g. risk score refreshed below 70), `approve` re-checks and may complete only if **all** gates pass.
 
 ## Tools
 
 | Tool | Type | Purpose |
 |------|------|---------|
+| `reset_seed_data` | write | Reload synthetic seed catalog (demo/test reset) |
 | `list_seed_scenarios` | read | Seed order IDs + expected outcomes |
 | `lookup_order` | read | Order + customer |
 | `lookup_payment` | read | Payment, balance, dispute flags |
@@ -92,7 +94,7 @@ Domain state is **in-process and shared** across tool calls for the life of the 
 | `issue_refund` | write | Auto-execute **or** escalate |
 | `list_escalations` | read | Escalations |
 | `get_escalation` | read | Escalation detail |
-| `resolve_escalation` | write | Manager approve / reject |
+| `resolve_escalation` | write | Manager reject, or approve with **full policy re-check** (no bypass) |
 
 ## Seed scenarios
 
@@ -119,7 +121,13 @@ All of the following must hold:
 6. No completed refund for the same `action` + `amount`
 7. Payment captured, **no chargeback/dispute flags**
 
-Otherwise `issue_refund` escalates. Money only moves later via `resolve_escalation` with `approve`.
+Otherwise `issue_refund` escalates and **moves no money**.
+
+### Manager resolution (`resolve_escalation`)
+
+- **`reject`** — close the escalation; no money moved.
+- **`approve`** — re-run the **full** auto-refund policy at execution time (same gates as above). Money moves **only** if every check passes now.
+- An escalation is **not** authorization to bypass a failed check (amount cap, risk, age, chargeback, etc.). If checks still fail, the escalation stays **pending**, no money moves, and any true exception refund is completed **outside** this automated MCP path.
 
 > **`action` is caller-provided scope.** Duplicate detection matches on `action` + `amount`. Use the same stable key for the same refund reason (e.g. always `full_refund_damaged`). If the key changes every call, duplicates will not be blocked.
 
@@ -143,6 +151,7 @@ src/
 - `action` is a stable key for duplicate detection **and is supplied by the caller**. Duplicate protection depends on the caller passing the same `action` + `amount` consistently for the same refund reason.
 - `riskScore` is assumed to come from an **external risk provider** (e.g. a fraud/risk scoring service keyed on `customerId`). This server does not compute it — it reads the static value from the customer record. In this demo it is hardcoded in the seed data.
 - Carrier exceptions must be present and `exceptionVerified: true`.
-- Chargeback/dispute flags always force escalation.
+- Chargeback/dispute flags always force escalation (and block approve-time completion until flags clear).
+- Manager approve never overrides policy; it only succeeds when a full re-check would allow auto-refund.
 - In-memory store resets on process restart.
 - Stateless Streamable HTTP per request; domain state is the shared process store.

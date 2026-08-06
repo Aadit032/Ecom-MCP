@@ -311,7 +311,13 @@ export function issueRefund(
 
 /**
  * Manager resolution of a pending escalation.
- * Approving is the only way a previously blocked refund may complete.
+ *
+ * Stakeholder boundary (execution-time re-check):
+ * - An escalation is NOT authorization for the MCP to bypass a failed policy check.
+ * - On approve, re-run the full auto-refund policy at execution time.
+ * - Money moves via this path only when every policy check passes now.
+ * - If checks still fail, leave the escalation pending, move no money, and keep any
+ *   true exception refund outside the automated MCP path.
  */
 export function resolveEscalation(
   store: Store,
@@ -321,11 +327,13 @@ export function resolveEscalation(
     resolvedBy: string;
     note?: string;
   },
+  now: Date = new Date(),
 ): {
   ok: boolean;
   message: string;
   escalation: Escalation | null;
   refund: Refund | null;
+  eligibility: EligibilityResult | null;
 } {
   const escalation = store.getEscalation(input.escalationId);
   if (!escalation) {
@@ -334,6 +342,7 @@ export function resolveEscalation(
       message: `Escalation not found: ${input.escalationId}`,
       escalation: null,
       refund: null,
+      eligibility: null,
     };
   }
   if (escalation.status !== "pending") {
@@ -342,6 +351,7 @@ export function resolveEscalation(
       message: `Escalation ${escalation.id} is already ${escalation.status}.`,
       escalation,
       refund: null,
+      eligibility: null,
     };
   }
 
@@ -355,62 +365,50 @@ export function resolveEscalation(
       message: `Escalation ${escalation.id} rejected. No money moved.`,
       escalation,
       refund: null,
+      eligibility: null,
     };
   }
 
-  // Approve → re-validate remaining balance / duplicate before moving money.
+  // Approve → re-check ALL auto-refund policy conditions at execution time.
+  // Escalation approval never overrides a still-failing policy check.
+  const eligibility = checkEligibility(
+    store,
+    {
+      orderId: escalation.orderId,
+      amount: escalation.requestedAmount,
+      action: escalation.action,
+    },
+    now,
+  );
+
+  if (!eligibility.eligibleForAutoRefund) {
+    const failed = eligibility.failedChecks
+      .map((c) => c.code)
+      .join(", ");
+    return {
+      ok: false,
+      message: `Approve blocked for ${escalation.id}: policy still fails at execution time (${failed || "unknown"}). Escalation remains pending; no money moved. Automated path will not complete this refund while checks fail — resolve any exception refund outside this MCP.`,
+      escalation,
+      refund: null,
+      eligibility,
+    };
+  }
+
+  // Policy now fully passes → complete under the same automated gates as issue_refund.
   const payment = store.getPayment(escalation.paymentId);
-  if (!payment) {
+  if (!payment || !eligibility.paymentId) {
     return {
       ok: false,
-      message: `Payment ${escalation.paymentId} missing; cannot approve.`,
+      message: `Payment ${escalation.paymentId} missing; cannot complete refund.`,
       escalation,
       refund: null,
-    };
-  }
-
-  const remaining = roundMoney(payment.amountPaid - payment.amountRefunded);
-  if (escalation.requestedAmount > remaining) {
-    escalation.status = "rejected";
-    escalation.resolvedAt = store.nowIso();
-    escalation.resolvedBy = input.resolvedBy;
-    escalation.resolutionNote =
-      input.note ??
-      `Auto-rejected on approve: requested $${escalation.requestedAmount.toFixed(2)} exceeds remaining $${remaining.toFixed(2)}.`;
-    return {
-      ok: false,
-      message: escalation.resolutionNote,
-      escalation,
-      refund: null,
-    };
-  }
-
-  const dupes = store
-    .listRefundsForOrder(escalation.orderId)
-    .filter(
-      (r) =>
-        r.status === "completed" &&
-        r.action === escalation.action &&
-        roundMoney(r.amount) === roundMoney(escalation.requestedAmount),
-    );
-  if (dupes.length > 0) {
-    escalation.status = "rejected";
-    escalation.resolvedAt = store.nowIso();
-    escalation.resolvedBy = input.resolvedBy;
-    escalation.resolutionNote =
-      input.note ??
-      `Auto-rejected on approve: duplicate completed refund already exists (${dupes[0]!.id}).`;
-    return {
-      ok: false,
-      message: escalation.resolutionNote,
-      escalation,
-      refund: null,
+      eligibility,
     };
   }
 
   const refund = store.recordCompletedRefund({
     orderId: escalation.orderId,
-    paymentId: escalation.paymentId,
+    paymentId: eligibility.paymentId,
     amount: escalation.requestedAmount,
     action: escalation.action,
     reason: escalation.reason,
@@ -421,14 +419,17 @@ export function resolveEscalation(
   escalation.status = "approved";
   escalation.resolvedAt = store.nowIso();
   escalation.resolvedBy = input.resolvedBy;
-  escalation.resolutionNote = input.note ?? "Approved by manager.";
+  escalation.resolutionNote =
+    input.note ??
+    "Approved after policy re-check at execution time; all auto-refund checks passed.";
   escalation.resultingRefundId = refund.id;
 
   return {
     ok: true,
-    message: `Escalation ${escalation.id} approved. Refund ${refund.id} completed for $${refund.amount.toFixed(2)}. Money moved under manager authority.`,
+    message: `Escalation ${escalation.id} approved after full policy re-check. Refund ${refund.id} completed for $${refund.amount.toFixed(2)}. Money moved.`,
     escalation,
     refund,
+    eligibility,
   };
 }
 

@@ -46,6 +46,54 @@ export function createRefundMcpServer(): McpServer {
     version: SERVER_VERSION,
   });
 
+  // ─── Demo / test utility ───────────────────────────────────────────────────
+
+  server.registerTool("reset_seed_data",
+    {
+      title: "Reset seed data",
+      description: `Reset the in-memory store to the original synthetic seed catalog.
+
+Use this between MCP client test runs so refunds, escalations, and payment balances match the documented scenarios again — without restarting the server process.
+
+Destructive for demo state only: clears all runtime refunds/escalations and reloads seed customers, orders, payments, shipments, and pre-seeded refunds.`,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      outputSchema: z.object({
+        ok: z.boolean(),
+        message: z.string(),
+        counts: z.object({
+          customers: z.number(),
+          orders: z.number(),
+          payments: z.number(),
+          shipments: z.number(),
+          refunds: z.number(),
+          escalations: z.number(),
+        }),
+      }),
+    },
+    async () => {
+      store.reset();
+      const output = {
+        ok: true as const,
+        message:
+          "Store reset to synthetic seed catalog. Seed scenarios match list_seed_scenarios again.",
+        counts: {
+          customers: store.customers.size,
+          orders: store.orders.size,
+          payments: store.payments.size,
+          shipments: store.shipments.size,
+          refunds: store.refunds.size,
+          escalations: store.escalations.size,
+        },
+      };
+      return jsonResult(output);
+    },
+  );
+
   // ─── Read: investigation tools ─────────────────────────────────────────────
 
   server.registerTool("list_seed_scenarios",
@@ -212,8 +260,9 @@ Behavior:
 - If ALL policy checks pass → auto-execute the refund (money moves).
 - If ANY policy check fails → create a manager-approval escalation and move NO money.
   Failed checks never complete the refund via mid-call human confirmation/elicitation.
+  Escalation is tracking only — it does not authorize a later policy bypass.
 
-Use check_refund_eligibility first for investigation. Use resolve_escalation after a manager reviews a pending escalation.`,
+Use check_refund_eligibility first for investigation. Use resolve_escalation to reject, or to approve only after conditions clear (full policy re-check at execution time).`,
       inputSchema: issueRefundInput,
       annotations: {
         readOnlyHint: false,
@@ -263,11 +312,11 @@ Use check_refund_eligibility first for investigation. Use resolve_escalation aft
     {
       title: "Resolve escalation (manager)",
       description: `Manager decision on a pending escalation.
-      
-      - approve: complete the refund under manager authority (money moves), subject to remaining balance and duplicate guards.
-      - reject: close the escalation without moving money.
 
-      This is the only path that may complete a refund that failed auto-policy checks.`,
+- reject: close the escalation without moving money.
+- approve: re-run the FULL auto-refund policy at execution time. Money moves only if every check passes now (same gates as check_refund_eligibility / issue_refund auto path).
+
+An escalation is NOT authorization to bypass a failed policy check. If checks still fail, the escalation stays pending, no money moves, and any exception refund must be completed outside this automated MCP path.`,
       inputSchema: resolveEscalationInput,
       annotations: {
         readOnlyHint: false,
