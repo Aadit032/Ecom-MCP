@@ -1,8 +1,26 @@
 # Ecom Refund Copilot (MCP)
 
-Synthetic **refund investigation and approval** MCP server. Agents look up order / payment / shipment context, evaluate auto-refund eligibility, and either auto-execute a refund or open a manager escalation.
+## Why this exists
+
+In online commerce, refund decisions often depend on engineering: ops needs order, payment, shipment, and risk data that only shows up in dashboards, logs, or ad-hoc queries. That slows the team down and keeps refund judgment tightly coupled to enggineers.
+
+This MCP server flips that. Operations (or an AI agent acting for them) can **look up the same context themselves**, run a **policy eligibility check**, and either **auto-issue a safe refund** or **escalate to a manager** — without waiting on eng for every case. The policy layer is the guardrail: amount caps, balance checks, age, risk, carrier exceptions, duplicates, and dispute flags stop bad refunds from moving money even when a caller asks for them.
 
 All data is local and synthetic. No real payments, credentials, frontend, or auth.
+
+## Layout
+
+```
+index.ts              # Express + Streamable HTTP
+src/
+  create-server.ts    # Tool registration
+  tool-schemas.ts     # Shared Zod input schemas
+  types.ts            # Domain types + policy constants
+  seed.ts             # Synthetic catalog
+  store.ts            # In-memory store
+  policy.ts           # Eligibility + issue/resolve
+  policy.test.ts      # Unit tests
+```
 
 ## Transport
 
@@ -43,8 +61,8 @@ Source: `src/policy.test.ts`.
 
    | Client | How |
    |--------|-----|
-   | **MCP Inspector** | `npx @modelcontextprotocol/inspector` → transport **Streamable HTTP** → URL `http://localhost:3000/mcp` |
-   | **Claude Desktop / Cursor / VS Code** | Add a remote MCP server pointing at `http://localhost:3000/mcp` (exact config keys vary by client) |
+   | **MCP Inspector** | `npx @modelcontextprotocol/inspector` → transport **Streamable HTTP** → URL `https://ecom-mcp.onrender.com/mcp` |
+   | **chatGPT / Claude / any other AI client** | Add a remote MCP server pointing at `https://ecom-mcp.onrender.com/mcp` |
 
 3. Confirm tools appear (`list_seed_scenarios`, `lookup_*`, `check_refund_eligibility`, `issue_refund`, etc.).
 
@@ -58,7 +76,7 @@ Source: `src/policy.test.ts`.
 
 Domain state is **in-process and shared** across tool calls for the life of the server process. Call **`reset_seed_data`** between test runs to restore the seed catalog without restarting (or restart the server).
 
-#### Case matrix (MCP client)
+#### Different order cases
 
 | # | Order | `amount` | `action` | Expected |
 |---|-------|----------|----------|----------|
@@ -96,19 +114,6 @@ Domain state is **in-process and shared** across tool calls for the life of the 
 | `get_escalation` | read | Escalation detail |
 | `resolve_escalation` | write | Manager reject, or approve with **full policy re-check** (no bypass) |
 
-## Seed scenarios
-
-| Order ID | Scenario | Expected |
-|----------|----------|----------|
-| `ord_auto_ok` | $89 damaged, low risk, recent | `auto_executed` |
-| `ord_over_cap` | $249 over $150 cap | `escalated` |
-| `ord_too_old` | &gt; 30 days old | `escalated` |
-| `ord_high_risk` | Risk score 82 | `escalated` |
-| `ord_no_exception` | No carrier exception | `escalated` |
-| `ord_already_refunded` | Duplicate action+amount | `escalated` |
-| `ord_chargeback` | Chargeback flagged | `escalated` |
-| `ord_partial_ok` | $50 of $60 remaining | `auto_executed` |
-
 ### Auto-refund policy
 
 All of the following must hold:
@@ -129,29 +134,15 @@ Otherwise `issue_refund` escalates and **moves no money**.
 - **`approve`** — re-run the **full** auto-refund policy at execution time (same gates as above). Money moves **only** if every check passes now.
 - An escalation is **not** authorization to bypass a failed check (amount cap, risk, age, chargeback, etc.). If checks still fail, the escalation stays **pending**, no money moves, and any true exception refund is completed **outside** this automated MCP path.
 
-> **`action` is caller-provided scope.** Duplicate detection matches on `action` + `amount`. Use the same stable key for the same refund reason (e.g. always `full_refund_damaged`). If the key changes every call, duplicates will not be blocked.
+## Some assumptions / decisions / exclusions for the current scope
 
-## Layout
-
-```
-index.ts              # Express + Streamable HTTP
-src/
-  create-server.ts    # Tool registration
-  tool-schemas.ts     # Shared Zod input schemas
-  types.ts            # Domain types + policy constants
-  seed.ts             # Synthetic catalog
-  store.ts            # In-memory store
-  policy.ts           # Eligibility + issue/resolve
-  policy.test.ts      # Unit tests
-```
-
-## Assumptions
-
-- USD amounts, two-decimal rounding.
-- `action` is a stable key for duplicate detection **and is supplied by the caller**. Duplicate protection depends on the caller passing the same `action` + `amount` consistently for the same refund reason.
+- Assuming USD amounts, two-decimal rounding.
+- `action` is a stable key for duplicate detection **and is supplied by the caller**. Duplicate protection depends on the caller passing the same `action` + `amount` consistently for the same refund reason. (Hard money safety still comes from remaining paid balance — see below.)
 - `riskScore` is assumed to come from an **external risk provider** (e.g. a fraud/risk scoring service keyed on `customerId`). This server does not compute it — it reads the static value from the customer record. In this demo it is hardcoded in the seed data.
 - Carrier exceptions must be present and `exceptionVerified: true`.
 - Chargeback/dispute flags always force escalation (and block approve-time completion until flags clear).
 - Manager approve never overrides policy; it only succeeds when a full re-check would allow auto-refund.
+- No mutators for underlying fail-reasons after escalation. There is no tool to refresh risk scores, clear chargeback/dispute flags, edit carrier exceptions, change order age, etc. In practice you can **escalate** and **reject**, but you usually cannot drive a successful `approve` path for seed cases that fail a sticky gate — those conditions never change inside this server. A later extension could add admin/simulation methods (e.g. set risk score, clear flags) so approve-time re-check becomes demonstrable end-to-end.
+- All domain memory is in-process. Customers, orders, payments, shipments, refunds, and escalations live in a single in-memory store. State is shared across tool calls for the life of the process and is lost on restart (or restored via `reset_seed_data`). No persistence, multi-instance sharing, or durable audit log. A later version could offload this to a DB (SQLite/Postgres/etc.) without changing the tool contracts much.
 - In-memory store resets on process restart.
 - Stateless Streamable HTTP per request; domain state is the shared process store.

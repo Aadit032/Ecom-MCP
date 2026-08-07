@@ -10,10 +10,10 @@ import type {
 /**
  * Synthetic catalog designed to exercise every auto-refund and escalation path.
  *
- * Reference "today" for age checks is the evaluation clock (Date.now()).
- * Seed dates use relative anchors so scenarios stay valid over time.
+ * Seed dates are relative to `referenceDate` (default: now) so scenarios stay
+ * valid over time. Tests should pass the same clock they use for eligibility.
  */
-export function seedData(): {
+export function seedData(referenceDate: Date = new Date()): {
   customers: Customer[];
   orders: Order[];
   payments: Payment[];
@@ -22,7 +22,7 @@ export function seedData(): {
   escalations: Escalation[];
 } {
   const daysAgo = (n: number): string => {
-    const d = new Date();
+    const d = new Date(referenceDate);
     d.setUTCDate(d.getUTCDate() - n);
     return d.toISOString().slice(0, 10);
   };

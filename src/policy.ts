@@ -142,7 +142,7 @@ export function checkEligibility(
     } else {
       checks.push({
         code: "not_over_paid",
-        passed: true,
+        passed: true, 
         message: `Requested $${amount.toFixed(2)} ≤ remaining refundable $${remaining.toFixed(2)}.`,
       });
     }

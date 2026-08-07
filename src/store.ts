@@ -32,9 +32,12 @@ export class Store {
     this.reset();
   }
 
-  /** Reset to the seeded synthetic catalog. Used by tests and the reset_seed_data MCP tool. */
-  reset(): void {
-    const data = seedData();
+  /**
+   * Reset to the seeded synthetic catalog. Used by tests and the reset_seed_data MCP tool.
+   * Pass `referenceDate` so order ages match a fixed evaluation clock in unit tests.
+   */
+  reset(referenceDate: Date = new Date()): void {
+    const data = seedData(referenceDate);
     this.customers = new Map(data.customers.map((c) => [c.id, structuredClone(c)]));
     this.orders = new Map(data.orders.map((o) => [o.id, structuredClone(o)]));
     this.payments = new Map(data.payments.map((p) => [p.id, structuredClone(p)]));

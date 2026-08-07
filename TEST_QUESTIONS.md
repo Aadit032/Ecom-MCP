@@ -165,10 +165,88 @@ Connect your AI client to the Streamable HTTP endpoint (`http://localhost:3000/m
 
 ---
 
-## Optional end-to-end prompt
+## End-to-end prompts (paste into an AI client)
 
-### 23. Full agent flow
+These are **full commerce-ops workflows**. Paste one prompt as-is after connecting to the MCP server. Prefer **`reset_seed_data`** first so seed state is clean. The agent should discover orders via tools (e.g. `list_seed_scenarios`, lookups) — you do not need to name tool APIs in the prompt.
 
-**Ask:** Customer on `ord_auto_ok` wants a full refund for damaged earbuds. Investigate, check policy, and only issue if auto-eligible.
+---
 
-**Expect:** Lookups → eligibility true → `auto_executed` (or a clear “safe to auto-refund” recommendation if they stop short of issue).
+### 23. Happy path — damaged item, auto-refund works
+
+**Paste:**
+
+> I'm on commerce ops. Customer Ava Chen says her wireless earbuds arrived damaged and she wants a full refund.  
+> Find her order in the catalog, pull order / payment / shipment / risk context, check whether we can auto-refund, and if policy allows, issue the refund with a clear reason.  
+> Summarize what you found, which policy checks passed, and whether money moved.
+
+**Expect:** Finds `ord_auto_ok` (~$89, low risk, verified **damaged**). Eligibility passes → **`auto_executed`**; completed refund; money moved.
+
+---
+
+### 24. Over cap — headphones too expensive for auto-refund
+
+**Paste:**
+
+> Customer Ava Chen ordered noise-cancelling headphones that the carrier marked lost. She wants a full refund of what she paid.  
+> Look up the order and payment, check auto-refund eligibility, and attempt the refund if appropriate.  
+> If it cannot auto-approve, open/show the escalation and explain which policy gate failed. Do not invent a bypass.
+
+**Expect:** Finds `ord_over_cap` (~$249). Eligibility fails **`amount_cap`** → **`escalated`**; pending escalation; **no money moved**. Agent should explain the $150 auto cap.
+
+---
+
+### 25. High risk — do not auto-refund
+
+**Paste:**
+
+> Casey Nguyen contacted support: both phone cases were the wrong item and they want a full refund (~$40).  
+> Investigate the customer and order, run eligibility, and only issue if auto-eligible. If risk or another gate blocks us, escalate and tell me why in plain language for the manager queue.
+
+**Expect:** Finds `ord_high_risk`. Risk **82** → fails **`customer_risk`** → **`escalated`**; no money moved. Agent should surface risk score vs threshold (&lt; 70).
+
+---
+
+### 26. Chargeback already open — must escalate
+
+**Paste:**
+
+> Ben Ortiz wants a refund on a fitness tracker because it showed up damaged. Before we pay anything, check payment dispute/chargeback status and full eligibility.  
+> If auto-refund is blocked, escalate with a clear reason and confirm that no money left the account.
+
+**Expect:** Finds `ord_chargeback` (~$120). Fails **`no_chargeback_or_dispute`** (and/or related flags) → **`escalated`**; **no money moved**.
+
+---
+
+### 27. No carrier exception — delivered clean, customer claims damage
+
+**Paste:**
+
+> Customer Ben Ortiz claims their desk lamp arrived damaged and wants a full refund.  
+> Pull shipment evidence. If there is no verified carrier exception, do not auto-refund — check eligibility, escalate if needed, and explain what evidence is missing for ops.
+
+**Expect:** Finds `ord_no_exception`. Fails **`carrier_exception`** → **`escalated`**; no money moved. Agent should note missing/unverified exception.
+
+---
+
+### 28. Manager queue after escalation (reject path)
+
+**Setup:** Run Q24 (or any escalate prompt) first so a pending escalation exists. Or include reset + issue in one go.
+
+**Paste:**
+
+> Act as commerce ops end-to-end:  
+> 1) Reset seed data.  
+> 2) Customer wants a full refund on lost noise-cancelling headphones (Ava Chen / high-value order) — investigate, try refund, expect escalation on amount cap.  
+> 3) List pending escalations and open the one for that order.  
+> 4) As manager `mgr_jordan`, try to **approve** it — report whether money moved.  
+> 5) Then **reject** a different pending case if one exists (or reject this one after showing approve was blocked), with note “Outside auto policy; handle offline if needed.”  
+> Walk me through the full ticket like a real ops handoff.
+
+**Expect:**
+1. Seed reset.  
+2. `ord_over_cap` → **`escalated`** (`amount_cap`); no money.  
+3. Escalation detail shows failed checks.  
+4. **Approve blocked** — re-check still fails; stays **pending**; no money.  
+5. **Reject** closes another (or same if you reject after) without money movement. Escalation is not a policy override.
+
+---

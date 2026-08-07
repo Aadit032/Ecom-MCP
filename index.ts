@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * Express + MCP Streamable HTTP entry.
  *

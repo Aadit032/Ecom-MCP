@@ -118,14 +118,23 @@ function failedCodes(result: { failedChecks: { code: string }[] }): string[] {
   return result.failedChecks.map((c) => c.code);
 }
 
+/** Fresh store seeded relative to the fixed evaluation clock (see NOW). */
+function freshStore(): Store {
+  const store = new Store();
+  store.reset(NOW);
+  return store;
+}
+
 describe("checkEligibility — seed scenarios", () => {
   let store: Store;
 
   beforeEach(() => {
-    store = new Store();
+    // Seed order ages must be relative to NOW, not wall-clock "today".
+    store = freshStore();
   });
 
   test("ord_auto_ok is eligible for full auto refund", () => {
+    // TEST_QUESTIONS Q8
     const result = checkEligibility(
       store,
       { orderId: "ord_auto_ok", amount: 89, action: "full_refund_damaged" },
@@ -136,6 +145,7 @@ describe("checkEligibility — seed scenarios", () => {
   });
 
   test("amount over $150 fails amount_cap", () => {
+    // TEST_QUESTIONS Q9
     const result = checkEligibility(
       store,
       { orderId: "ord_over_cap", amount: 249, action: "full_refund_lost" },
@@ -146,6 +156,7 @@ describe("checkEligibility — seed scenarios", () => {
   });
 
   test("order older than 30 days fails order_age", () => {
+    // TEST_QUESTIONS Q10
     const result = checkEligibility(
       store,
       {
@@ -160,6 +171,7 @@ describe("checkEligibility — seed scenarios", () => {
   });
 
   test("high risk customer fails customer_risk", () => {
+    // TEST_QUESTIONS Q11
     const result = checkEligibility(
       store,
       {
@@ -174,9 +186,10 @@ describe("checkEligibility — seed scenarios", () => {
   });
 
   test("missing carrier exception fails carrier_exception", () => {
+    // TEST_QUESTIONS Q11 — action matches the question catalog
     const result = checkEligibility(
       store,
-      { orderId: "ord_no_exception", amount: 64, action: "goodwill_refund" },
+      { orderId: "ord_no_exception", amount: 64, action: "full_refund_damaged" },
       NOW,
     );
     expect(result.eligibleForAutoRefund).toBe(false);
@@ -184,6 +197,7 @@ describe("checkEligibility — seed scenarios", () => {
   });
 
   test("duplicate action+amount fails no_duplicate_refund", () => {
+    // TEST_QUESTIONS Q12
     const result = checkEligibility(
       store,
       {
@@ -198,6 +212,7 @@ describe("checkEligibility — seed scenarios", () => {
   });
 
   test("chargeback flag fails no_chargeback_or_dispute", () => {
+    // TEST_QUESTIONS Q11
     const result = checkEligibility(
       store,
       {
@@ -212,9 +227,10 @@ describe("checkEligibility — seed scenarios", () => {
   });
 
   test("amount greater than remaining paid balance fails not_over_paid", () => {
+    // TEST_QUESTIONS Q14 — only ~$60 remains on ord_partial_ok
     const result = checkEligibility(
       store,
-      { orderId: "ord_partial_ok", amount: 70, action: "additional_refund" },
+      { orderId: "ord_partial_ok", amount: 70, action: "full_refund_damaged" },
       NOW,
     );
     expect(result.eligibleForAutoRefund).toBe(false);
@@ -222,12 +238,13 @@ describe("checkEligibility — seed scenarios", () => {
   });
 
   test("partial remaining within policy is eligible", () => {
+    // TEST_QUESTIONS Q13
     const result = checkEligibility(
       store,
       {
         orderId: "ord_partial_ok",
         amount: 50,
-        action: "balance_refund_damaged",
+        action: "full_refund_damaged",
       },
       NOW,
     );
@@ -239,7 +256,7 @@ describe("checkEligibility — missing graph nodes", () => {
   let store: Store;
 
   beforeEach(() => {
-    store = new Store();
+    store = freshStore();
   });
 
   test("unknown order is not eligible", () => {
@@ -340,7 +357,7 @@ describe("checkEligibility — payment status", () => {
   let store: Store;
 
   beforeEach(() => {
-    store = new Store();
+    store = freshStore();
   });
 
   test("authorized payment fails payment_captured", () => {
@@ -400,7 +417,7 @@ describe("checkEligibility — amount_cap edge values", () => {
   let store: Store;
 
   beforeEach(() => {
-    store = new Store();
+    store = freshStore();
     installFixture(store, {
       orderId: "ord_cap",
       payment: { amountPaid: 200, amountRefunded: 0 },
@@ -456,7 +473,7 @@ describe("checkEligibility — order age and risk boundaries", () => {
   let store: Store;
 
   beforeEach(() => {
-    store = new Store();
+    store = freshStore();
   });
 
   test("exactly 30 days old passes order_age (inclusive)", () => {
@@ -581,10 +598,11 @@ describe("issueRefund write path", () => {
   let store: Store;
 
   beforeEach(() => {
-    store = new Store();
+    store = freshStore();
   });
 
   test("auto-executes when all checks pass and moves money", () => {
+    // TEST_QUESTIONS Q15
     const before = store.getPaymentByOrder("ord_auto_ok")!;
     expect(before.amountRefunded).toBe(0);
 
@@ -594,7 +612,7 @@ describe("issueRefund write path", () => {
         orderId: "ord_auto_ok",
         amount: 89,
         action: "full_refund_damaged",
-        reason: "Carrier-verified damage",
+        reason: "Damaged earbuds",
       },
       NOW,
     );
@@ -645,6 +663,7 @@ describe("issueRefund write path", () => {
   });
 
   test("policy failure creates escalation and does not move money", () => {
+    // TEST_QUESTIONS Q16
     const before = store.getPaymentByOrder("ord_over_cap")!;
     const refundedBefore = before.amountRefunded;
 
@@ -664,9 +683,30 @@ describe("issueRefund write path", () => {
     expect(result.escalation).not.toBeNull();
     expect(result.escalation!.status).toBe("pending");
     expect(result.escalation!.failedChecks.length).toBeGreaterThan(0);
+    expect(failedCodes(result.eligibility)).toContain("amount_cap");
 
     const after = store.getPaymentByOrder("ord_over_cap")!;
     expect(after.amountRefunded).toBe(refundedBefore);
+  });
+
+  test("chargeback issue escalates with no money movement", () => {
+    // TEST_QUESTIONS Q17
+    const result = issueRefund(
+      store,
+      {
+        orderId: "ord_chargeback",
+        amount: 120,
+        action: "full_refund_damaged",
+        reason: "Customer request despite chargeback",
+      },
+      NOW,
+    );
+    expect(result.outcome).toBe("escalated");
+    expect(result.refund).toBeNull();
+    expect(failedCodes(result.eligibility)).toContain(
+      "no_chargeback_or_dispute",
+    );
+    expect(store.getPaymentByOrder("ord_chargeback")!.amountRefunded).toBe(0);
   });
 
   test("zero amount escalates (policy fail) rather than auto-executing", () => {
@@ -833,10 +873,11 @@ describe("resolveEscalation", () => {
   let store: Store;
 
   beforeEach(() => {
-    store = new Store();
+    store = freshStore();
   });
 
   test("approve does not bypass still-failing policy (amount_cap) — no money moved", () => {
+    // TEST_QUESTIONS Q19 (after Q16)
     const issued = issueRefund(
       store,
       {
@@ -874,7 +915,53 @@ describe("resolveEscalation", () => {
     expect(resolved.message.toLowerCase()).toContain("policy still fails");
   });
 
+  test("over-cap still not auto-payable after blocked approve (re-issue escalates)", () => {
+    // TEST_QUESTIONS Q21 — Q16 + Q19 then issue again
+    const first = issueRefund(
+      store,
+      {
+        orderId: "ord_over_cap",
+        amount: 249,
+        action: "full_refund_lost",
+        reason: "Lost package",
+      },
+      NOW,
+    );
+    expect(first.outcome).toBe("escalated");
+    const escId = first.escalation!.id;
+
+    const blocked = resolveEscalation(
+      store,
+      {
+        escalationId: escId,
+        decision: "approve",
+        resolvedBy: "mgr_jordan",
+        note: "Attempt override",
+      },
+      NOW,
+    );
+    expect(blocked.ok).toBe(false);
+    expect(store.getEscalation(escId)!.status).toBe("pending");
+    expect(store.getPaymentByOrder("ord_over_cap")!.amountRefunded).toBe(0);
+
+    const second = issueRefund(
+      store,
+      {
+        orderId: "ord_over_cap",
+        amount: 249,
+        action: "full_refund_lost",
+        reason: "Lost package retry",
+      },
+      NOW,
+    );
+    expect(second.outcome).toBe("escalated");
+    expect(second.refund).toBeNull();
+    expect(failedCodes(second.eligibility)).toContain("amount_cap");
+    expect(store.getPaymentByOrder("ord_over_cap")!.amountRefunded).toBe(0);
+  });
+
   test("approve completes refund only after full policy re-check passes", () => {
+    // TEST_QUESTIONS Q22
     installFixture(store, {
       orderId: "ord_risk_then_clear",
       payment: { amountPaid: 80, amountRefunded: 0 },
@@ -920,16 +1007,18 @@ describe("resolveEscalation", () => {
   });
 
   test("manager reject leaves money unmoved", () => {
+    // TEST_QUESTIONS Q20
     const issued = issueRefund(
       store,
       {
-        orderId: "ord_no_exception",
-        amount: 64,
-        action: "goodwill_refund",
-        reason: "Customer requested goodwill",
+        orderId: "ord_too_old",
+        amount: 45,
+        action: "full_refund_never_delivered",
+        reason: "Never arrived",
       },
       NOW,
     );
+    expect(issued.outcome).toBe("escalated");
     const escId = issued.escalation!.id;
 
     const resolved = resolveEscalation(
@@ -938,7 +1027,7 @@ describe("resolveEscalation", () => {
         escalationId: escId,
         decision: "reject",
         resolvedBy: "mgr_sam",
-        note: "No exception; deny goodwill",
+        note: "Outside policy; deny.",
       },
       NOW,
     );
@@ -946,7 +1035,7 @@ describe("resolveEscalation", () => {
     expect(resolved.ok).toBe(true);
     expect(resolved.refund).toBeNull();
     expect(resolved.eligibility).toBeNull();
-    expect(store.getPaymentByOrder("ord_no_exception")!.amountRefunded).toBe(0);
+    expect(store.getPaymentByOrder("ord_too_old")!.amountRefunded).toBe(0);
     expect(store.getEscalation(escId)!.status).toBe("rejected");
   });
 
