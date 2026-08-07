@@ -20,6 +20,12 @@ Connect your AI client to the Streamable HTTP endpoint (`http://localhost:3000/m
 
 **Expect:** Policy `150` / `30` / `70`. Eight orders; `ord_auto_ok` and `ord_partial_ok` expected auto; the rest escalate.
 
+### 1b. List all orders (discover by customer name)
+
+**Ask:** List all orders and their customers so I can find Ava Chen’s wireless earbuds order.
+
+**Expect:** Every order with customer name/id/risk; Ava Chen on `ord_auto_ok` (wireless earbuds), `ord_over_cap`, etc. Use this when prompts only give a customer name.
+
 ### 2. Look up a clean order
 
 **Ask:** Investigate order `ord_auto_ok` — customer, payment, and shipment.
@@ -167,7 +173,7 @@ Connect your AI client to the Streamable HTTP endpoint (`http://localhost:3000/m
 
 ## End-to-end prompts (paste into an AI client)
 
-These are **full commerce-ops workflows**. Paste one prompt as-is after connecting to the MCP server. Prefer **`reset_seed_data`** first so seed state is clean. The agent should discover orders via tools (e.g. `list_seed_scenarios`, lookups) — you do not need to name tool APIs in the prompt.
+These are **full commerce-ops workflows**. Paste one prompt as-is after connecting to the MCP server. Prefer **`reset_seed_data`** first so seed state is clean. The agent should discover orders via tools (e.g. **`list_orders`** by customer name, `list_seed_scenarios`, lookups) — you do not need to name tool APIs in the prompt.
 
 ---
 

@@ -125,6 +125,32 @@ Destructive for demo state only: clears all runtime refunds/escalations and relo
     },
   );
 
+  server.registerTool("list_orders",
+    {
+      title: "List orders",
+      description:
+        "List all synthetic orders with linked customer summary (name, email, risk). Use when the caller only has a customer name or item description and needs to discover the order ID before lookup_order / eligibility.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async () => {
+      const orders = store.listOrders().map((order) => {
+        const c = store.getCustomer(order.customerId);
+        return {
+          order,
+          customer: c
+            ? {
+                id: c.id,
+                name: c.name,
+                email: c.email,
+                riskScore: c.riskScore,
+              }
+            : null,
+        };
+      });
+      return jsonResult({ count: orders.length, orders });
+    },
+  );
+
   server.registerTool("lookup_order",
     {
       title: "Lookup order",

@@ -64,15 +64,16 @@ Source: `src/policy.test.ts`.
    | **MCP Inspector** | `npx @modelcontextprotocol/inspector` → transport **Streamable HTTP** → URL `https://ecom-mcp.onrender.com/mcp` |
    | **chatGPT / Claude / any other AI client** | Add a remote MCP server pointing at `https://ecom-mcp.onrender.com/mcp` |
 
-3. Confirm tools appear (`list_seed_scenarios`, `lookup_*`, `check_refund_eligibility`, `issue_refund`, etc.).
+3. Confirm tools appear (`list_orders`, `list_seed_scenarios`, `lookup_*`, `check_refund_eligibility`, `issue_refund`, etc.).
 
 4. Ask natural-language prompts from **[TEST_QUESTIONS.md](./TEST_QUESTIONS.md)** (questions + expected results for AI-client review). Suggested flow:
 
-   1. Call **`list_seed_scenarios`** to see order IDs and expected outcomes.
-   2. For a case, **`lookup_order`** / **`lookup_payment`** / **`lookup_shipment`** as needed.
-   3. **`check_refund_eligibility`** (read-only) with `orderId`, `amount`, `action`.
-   4. **`issue_refund`** with the same args plus `reason` — expect `auto_executed` or `escalated`.
-   5. If escalated: **`list_escalations`** or **`get_escalation`**, then **`resolve_escalation`** (`reject`, or `approve` only when conditions can pass a full re-check).
+   1. Call **`list_orders`** when you only have a customer name / item (maps to order ID + customer).
+   2. Or **`list_seed_scenarios`** for expected auto vs escalate outcomes by order ID.
+   3. For a case, **`lookup_order`** / **`lookup_payment`** / **`lookup_shipment`** as needed.
+   4. **`check_refund_eligibility`** (read-only) with `orderId`, `amount`, `action`.
+   5. **`issue_refund`** with the same args plus `reason` — expect `auto_executed` or `escalated`.
+   6. If escalated: **`list_escalations`** or **`get_escalation`**, then **`resolve_escalation`** (`reject`, or `approve` only when conditions can pass a full re-check).
 
 Domain state is **in-process and shared** across tool calls for the life of the server process. Call **`reset_seed_data`** between test runs to restore the seed catalog without restarting (or restart the server).
 
@@ -102,6 +103,7 @@ Domain state is **in-process and shared** across tool calls for the life of the 
 | Tool | Type | Purpose |
 |------|------|---------|
 | `reset_seed_data` | write | Reload synthetic seed catalog (demo/test reset) |
+| `list_orders` | read | All orders + linked customer (name, risk) |
 | `list_seed_scenarios` | read | Seed order IDs + expected outcomes |
 | `lookup_order` | read | Order + customer |
 | `lookup_payment` | read | Payment, balance, dispute flags |
