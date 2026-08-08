@@ -6,11 +6,11 @@ import { z } from "zod";
 
 // ─── Shared domain shapes ────────────────────────────────────────────────────
 
-export const writeTokenField = z
+export const writeKeyField = z
   .string()
   .min(1)
   .describe(
-    "Secret write token (WRITE_TOKEN). Required for mutative tools; not needed for read tools.",
+    "Shared write key from server env WRITE_TOKEN. Required for mutative tools; not needed for read tools.",
   );
 
 export const customerSchema = z.object({
@@ -141,7 +141,7 @@ export const emptyInput = z.object({}).strict();
 // ─── Input schemas ───────────────────────────────────────────────────────────
 
 export const resetSeedDataInput = z.object({
-  token: writeTokenField,
+  writeKey: writeKeyField,
 });
 
 export const listSeedScenariosInput = emptyInput;
@@ -182,7 +182,7 @@ export const checkRefundEligibilityInput = z.object({
 });
 
 export const issueRefundInput = z.object({
-  token: writeTokenField,
+  writeKey: writeKeyField,
   orderId: z.string().describe("Order ID"),
   amount: z.number().positive().describe("Refund amount in USD"),
   action: z
@@ -204,7 +204,7 @@ export const getEscalationInput = z.object({
 });
 
 export const resolveEscalationInput = z.object({
-  token: writeTokenField,
+  writeKey: writeKeyField,
   escalationId: z.string().describe("Pending escalation ID"),
   decision: z.enum(["approve", "reject"]),
   resolvedBy: z.string().min(1).describe("Manager identifier, e.g. mgr_jordan"),

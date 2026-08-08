@@ -66,7 +66,7 @@ export function createRefundMcpServer(): McpServer {
     version: SERVER_VERSION,
   });
 
-  // ─── Demo / test utility (write — requires token) ──────────────────────────
+  // ─── Demo / test utility (write — requires writeKey) ───────────────────────
 
   server.registerTool(
     "reset_seed_data",
@@ -78,7 +78,7 @@ Use this between MCP client test runs so refunds, escalations, and payment balan
 
 Destructive for demo state only: clears all runtime refunds/escalations and reloads seed customers, orders, payments, shipments, and pre-seeded refunds.
 
-Requires the write secret token (WRITE_TOKEN).`,
+Requires writeKey (matches server WRITE_TOKEN).`,
       inputSchema: resetSeedDataInput,
       outputSchema: resetSeedDataOutput,
       annotations: {
@@ -88,8 +88,8 @@ Requires the write secret token (WRITE_TOKEN).`,
         openWorldHint: false,
       },
     },
-    async ({ token }) => {
-      const auth = assertWriteToken(token);
+    async ({ writeKey }) => {
+      const auth = assertWriteToken(writeKey);
       if (!auth.ok) return unauthorized(auth);
 
       await store.reset();
@@ -305,7 +305,7 @@ If any check fails, issue_refund will escalate for manager approval instead of r
       title: "Issue refund (guarded)",
       description: `Attempt a refund under the auto-approval policy.
 
-Requires the write secret token (WRITE_TOKEN).
+Requires writeKey (matches server WRITE_TOKEN).
 
 Behavior:
 - If ALL policy checks pass → auto-execute the refund (money moves).
@@ -324,8 +324,8 @@ Use check_refund_eligibility first for investigation. Use resolve_escalation to 
         openWorldHint: false,
       },
     },
-    async ({ token, orderId, amount, action, reason }) => {
-      const auth = assertWriteToken(token);
+    async ({ writeKey, orderId, amount, action, reason }) => {
+      const auth = assertWriteToken(writeKey);
       if (!auth.ok) return unauthorized(auth);
 
       const result = await issueRefund(store, {
@@ -379,7 +379,7 @@ Use check_refund_eligibility first for investigation. Use resolve_escalation to 
       title: "Resolve escalation (manager)",
       description: `Manager decision on a pending escalation.
 
-Requires the write secret token (WRITE_TOKEN).
+Requires writeKey (matches server WRITE_TOKEN).
 
 - reject: close the escalation without moving money.
 - approve: re-run the FULL auto-refund policy at execution time. Money moves only if every check passes now (same gates as check_refund_eligibility / issue_refund auto path).
@@ -394,8 +394,8 @@ An escalation is NOT authorization to bypass a failed policy check. If checks st
         openWorldHint: false,
       },
     },
-    async ({ token, escalationId, decision, resolvedBy, note }) => {
-      const auth = assertWriteToken(token);
+    async ({ writeKey, escalationId, decision, resolvedBy, note }) => {
+      const auth = assertWriteToken(writeKey);
       if (!auth.ok) return unauthorized(auth);
 
       const result = await resolveEscalation(store, {

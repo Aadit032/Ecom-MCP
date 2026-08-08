@@ -88,10 +88,10 @@ Source: `src/policy.test.ts` — eligibility, issue/resolve paths, store status 
 Suggested flow:
 
 1. **`list_orders`** or **`list_seed_scenarios`** to discover order IDs.
-2. **`lookup_*`** / **`check_refund_eligibility`** (public, no token).
-3. **`issue_refund`** with `token` + args — expect `auto_executed` or `escalated`.
-4. If escalated: **`resolve_escalation`** with `token` (`reject`, or `approve` only when full re-check can pass).
-5. Between runs: **`reset_seed_data`** with `token` reloads the seed catalog.
+2. **`lookup_*`** / **`check_refund_eligibility`** (public, no writeKey).
+3. **`issue_refund`** with `writeKey` + args — expect `auto_executed` or `escalated`.
+4. If escalated: **`resolve_escalation`** with `writeKey` (`reject`, or `approve` only when full re-check can pass).
+5. Between runs: **`reset_seed_data`** with `writeKey` reloads the seed catalog.
 
 #### Different order cases
 
@@ -108,7 +108,7 @@ Suggested flow:
 
 **Escalation round-trip**
 
-1. `issue_refund` on `ord_over_cap` (amount `249`, with `token`) → note `escalation.id`.
+1. `issue_refund` on `ord_over_cap` (amount `249`, with `writeKey`) → note `escalation.id`.
 2. `get_escalation` → `failedChecks` includes `amount_cap`.
 3. `resolve_escalation` `approve` → **blocked** (re-check still fails); stays **pending**; no money moved.
 4. `resolve_escalation` `reject` on another pending case → closed; no money moved.
@@ -117,7 +117,7 @@ Suggested flow:
 
 | Tool | Type | Auth | Purpose |
 |------|------|------|---------|
-| `reset_seed_data` | write | `token` | Reload synthetic seed catalog |
+| `reset_seed_data` | write | `writeKey` | Reload synthetic seed catalog |
 | `list_orders` | read | public | All orders + linked customer |
 | `list_seed_scenarios` | read | public | Seed order IDs + expected outcomes |
 | `lookup_order` | read | public | Order + customer |
@@ -126,10 +126,10 @@ Suggested flow:
 | `lookup_customer` | read | public | Customer risk score |
 | `list_refunds` | read | public | Refunds for an order |
 | `check_refund_eligibility` | read | public | Policy report (no side effects) |
-| `issue_refund` | write | `token` | Auto-execute **or** escalate |
+| `issue_refund` | write | `writeKey` | Auto-execute **or** escalate |
 | `list_escalations` | read | public | Escalations |
 | `get_escalation` | read | public | Escalation detail |
-| `resolve_escalation` | write | `token` | Manager reject, or approve with **full re-check** |
+| `resolve_escalation` | write | `writeKey` | Manager reject, or approve with **full re-check** |
 
 ### Auto-refund policy
 
@@ -151,7 +151,7 @@ Completed refunds are unique on **`(paymentId, amount)`** (DB constraint + polic
 
 ### Write guardrails
 
-`reset_seed_data`, `issue_refund`, and `resolve_escalation` require a `token` argument matching `WRITE_TOKEN`. Read tools stay public.
+`reset_seed_data`, `issue_refund`, and `resolve_escalation` require a `writeKey` argument matching `WRITE_TOKEN`. Read tools stay public.
 
 ### Manager resolution (`resolve_escalation`)
 
