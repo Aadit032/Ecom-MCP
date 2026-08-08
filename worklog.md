@@ -50,9 +50,9 @@ Early design paused on policy failure and completed the refund via MCP elicitati
 
 `resolve_escalation(approve)` originally completed refunds under "manager authority" re-checking only balance and duplicates, so over-cap/high-risk/chargeback cases could still pay on approve; after a follow-up with the team it now re-runs all policy checks at execution time and moves money only if every gate passes, otherwise the escalation stays pending.
 
-### Stdio (and optional auth) → Streamable HTTP only, no auth
+### Stdio (and optional auth) → Streamable HTTP only, shared write token
 
-Defaulted toward stdio (and optional auth) like typical local MCP demos, corrected to a remote Express + Streamable HTTP server with stdio and auth removed as out of scope, exposing a single `/mcp` surface plus `/health`.
+Defaulted toward stdio (and optional auth) like typical local MCP demos, corrected to a remote Express + Streamable HTTP server with stdio removed as out of scope, exposing a single `/mcp` surface plus `/health`. Write tools are later guarded by a shared `WRITE_TOKEN` (`token` argument) after the Postgres migration.
 
 ### Tool-schema tests and curl-based testing docs
 
@@ -61,6 +61,18 @@ Drop the proposed Zod/tool-schema unit tests and curl-based docs; document only 
 ### Scope creep
 
 No frontend, auth, full commerce, or heavy CI/CD — push back on anything that would bloat the demo beyond a focused MCP copilot. 
+
+### Foreign keys went back in, despite edge-case tests
+
+The agent originally dropped FKs on `Order.customerId` and `Escalation.paymentId` (`relax_edge_case_fks`) so that "missing graph node" tests (`ord_no_pay`, `ord_no_ship`, unknown-customer edge cases) could write orphaned rows. I pushed back and re-added the FKs (`add_customer_payment_fks`): relational integrity and cascade-cleanup win over making fixture inserts convenient, and the tests were updated to build valid customer/payment rows for those scenarios instead of relying on orphaned data.
+
+### Extend tool call vs MCP reinforcement loop
+
+Past tool prompts needed order IDs up front. I asked the agent to let clients discover orders by **customer name** (`list_orders`) rather than hard-coding order IDs into every prompt; test questions now deliberately leave IDs to discovery by the agent (Ava Chen / Casey Nguyen / Ben Ortiz flows).
+
+### Idempotency key fixed to `paymentId + amount`
+
+The model keyed duplicates on `action` (+ `amount`); since `action` is free-form/caller-supplied, I moved the uniqueness (and DB `@@unique`) to `(paymentId, amount)` based on the suggestions given by the team so a retry or a parallel auto-path can never double-pay — the duplicate-refund escalation tests cover the race. 
 
 
 ## How AI-generated work was verified
@@ -76,9 +88,9 @@ After deploying I added the server as an MCP connection in ChatGPT and, using th
 
 | Item | Status / risk |
 |------|----------------|
-| **In-memory store** | State resets on process restart; not multi-instance safe. Fine for demo; not production-ready persistence. |
-| **No authentication** | Intentional for assignment scope; anyone who can reach `/mcp` can call write tools. |
+| **Postgres-backed store** | Durable via Prisma; shared across process restarts. Tests and `reset_seed_data` reload the synthetic catalog each run. |
+| **Shared `WRITE_TOKEN` guardrail** | Write tools require a shared secret token; anyone without the token cannot move money, but the token is shared (single shared-secret, no per-user auth). |
 | **Risk score is seed data** | Documented as “external provider” shape; not a live fraud model. |
-| **`action` key is caller-supplied** | Duplicate detection depends on stable `action` + `amount`; a sloppy agent can weaken duplicate protection. |
+| **`action` key is caller-supplied** | Duplicate detection keys on **`paymentId` + `amount`** (not `action`); `action` is only an audit label, so it can't weaken duplicate protection. |
 | **Streamable HTTP + shared process state** | Concurrent clients share one store—good for a live demo, surprising if treated as multi-tenant. |
 | **Broader E2E automation** | Unit tests are strong; full MCP-protocol integration tests in CI are not a focus. |

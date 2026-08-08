@@ -3,23 +3,37 @@
  * Tools register against the process-wide Postgres-backed store.
  */
 import { McpServer } from "@modelcontextprotocol/server";
-import { z } from "zod";
 import { assertWriteToken } from "./auth.ts";
 import { checkEligibility, issueRefund, resolveEscalation } from "./policy.ts";
 import { SEED_SCENARIOS } from "./seed.ts";
 import { store } from "./store.ts";
 import {
   checkRefundEligibilityInput,
+  checkRefundEligibilityOutput,
   getEscalationInput,
+  getEscalationOutput,
   issueRefundInput,
+  issueRefundOutput,
   listEscalationsInput,
+  listEscalationsOutput,
+  listOrdersInput,
+  listOrdersOutput,
   listRefundsInput,
+  listRefundsOutput,
+  listSeedScenariosInput,
+  listSeedScenariosOutput,
   lookupCustomerInput,
+  lookupCustomerOutput,
   lookupOrderInput,
+  lookupOrderOutput,
   lookupPaymentInput,
+  lookupPaymentOutput,
   lookupShipmentInput,
+  lookupShipmentOutput,
   resetSeedDataInput,
+  resetSeedDataOutput,
   resolveEscalationInput,
+  resolveEscalationOutput,
 } from "./tool-schemas.ts";
 import { POLICY } from "./types.ts";
 
@@ -54,7 +68,8 @@ export function createRefundMcpServer(): McpServer {
 
   // ─── Demo / test utility (write — requires token) ──────────────────────────
 
-  server.registerTool("reset_seed_data",
+  server.registerTool(
+    "reset_seed_data",
     {
       title: "Reset seed data",
       description: `Reset the Postgres store to the original synthetic seed catalog.
@@ -65,24 +80,13 @@ Destructive for demo state only: clears all runtime refunds/escalations and relo
 
 Requires the write secret token (WRITE_TOKEN).`,
       inputSchema: resetSeedDataInput,
+      outputSchema: resetSeedDataOutput,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: true,
         openWorldHint: false,
       },
-      outputSchema: z.object({
-        ok: z.boolean(),
-        message: z.string(),
-        counts: z.object({
-          customers: z.number(),
-          orders: z.number(),
-          payments: z.number(),
-          shipments: z.number(),
-          refunds: z.number(),
-          escalations: z.number(),
-        }),
-      }),
     },
     async ({ token }) => {
       const auth = assertWriteToken(token);
@@ -102,26 +106,15 @@ Requires the write secret token (WRITE_TOKEN).`,
 
   // ─── Read: investigation tools ─────────────────────────────────────────────
 
-  server.registerTool("list_seed_scenarios",
+  server.registerTool(
+    "list_seed_scenarios",
     {
       title: "List seed scenarios",
       description:
         "List synthetic seed orders and the expected issue_refund outcome for each scenario. Use this to discover order IDs while investigating.",
+      inputSchema: listSeedScenariosInput,
+      outputSchema: listSeedScenariosOutput,
       annotations: { readOnlyHint: true, openWorldHint: false },
-      outputSchema: z.object({
-        policy: z.object({
-          maxAutoRefundUsd: z.number(),
-          maxOrderAgeDays: z.number(),
-          maxCustomerRiskExclusive: z.number(),
-        }),
-        scenarios: z.array(
-          z.object({
-            orderId: z.string(),
-            scenario: z.string(),
-            expected: z.string(),
-          }),
-        ),
-      }),
     },
     async () => {
       const output = {
@@ -132,11 +125,14 @@ Requires the write secret token (WRITE_TOKEN).`,
     },
   );
 
-  server.registerTool("list_orders",
+  server.registerTool(
+    "list_orders",
     {
       title: "List orders",
       description:
         "List all synthetic orders with linked customer summary (name, email, risk). Use when the caller only has a customer name or item description and needs to discover the order ID before lookup_order / eligibility.",
+      inputSchema: listOrdersInput,
+      outputSchema: listOrdersOutput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
@@ -160,12 +156,14 @@ Requires the write secret token (WRITE_TOKEN).`,
     },
   );
 
-  server.registerTool("lookup_order",
+  server.registerTool(
+    "lookup_order",
     {
       title: "Lookup order",
       description:
         "Look up a synthetic order by order ID, including linked customer summary.",
       inputSchema: lookupOrderInput,
+      outputSchema: lookupOrderOutput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ orderId }) => {
@@ -176,12 +174,14 @@ Requires the write secret token (WRITE_TOKEN).`,
     },
   );
 
-  server.registerTool("lookup_payment",
+  server.registerTool(
+    "lookup_payment",
     {
       title: "Lookup payment",
       description:
         "Look up payment by payment ID or order ID. Includes amount paid, amount already refunded, and chargeback/dispute flags.",
       inputSchema: lookupPaymentInput,
+      outputSchema: lookupPaymentOutput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ paymentId, orderId }) => {
@@ -202,12 +202,14 @@ Requires the write secret token (WRITE_TOKEN).`,
     },
   );
 
-  server.registerTool("lookup_shipment",
+  server.registerTool(
+    "lookup_shipment",
     {
       title: "Lookup shipment",
       description:
         "Look up shipment by shipment ID or order ID. Includes carrier exception type and whether it is verified (required for auto-refund).",
       inputSchema: lookupShipmentInput,
+      outputSchema: lookupShipmentOutput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ shipmentId, orderId }) => {
@@ -226,12 +228,14 @@ Requires the write secret token (WRITE_TOKEN).`,
     },
   );
 
-  server.registerTool("lookup_customer",
+  server.registerTool(
+    "lookup_customer",
     {
       title: "Lookup customer",
       description:
         "Look up a customer by ID, including risk score used by policy.",
       inputSchema: lookupCustomerInput,
+      outputSchema: lookupCustomerOutput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ customerId }) => {
@@ -241,12 +245,14 @@ Requires the write secret token (WRITE_TOKEN).`,
     },
   );
 
-  server.registerTool("list_refunds",
+  server.registerTool(
+    "list_refunds",
     {
       title: "List refunds for order",
       description:
         "List existing refund records for an order (completed or otherwise).",
       inputSchema: listRefundsInput,
+      outputSchema: listRefundsOutput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ orderId }) => {
@@ -261,7 +267,8 @@ Requires the write secret token (WRITE_TOKEN).`,
 
   // ─── Eligibility (read-only decision support) ──────────────────────────────
 
-  server.registerTool("check_refund_eligibility",
+  server.registerTool(
+    "check_refund_eligibility",
     {
       title: "Check refund eligibility",
       description: `Evaluate auto-refund policy for an order without side effects or moving money.
@@ -277,6 +284,7 @@ Auto-execute requires ALL of:
 
 If any check fails, issue_refund will escalate for manager approval instead of refunding.`,
       inputSchema: checkRefundEligibilityInput,
+      outputSchema: checkRefundEligibilityOutput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ orderId, amount, action }) => {
@@ -291,7 +299,8 @@ If any check fails, issue_refund will escalate for manager approval instead of r
 
   // ─── Write path: guarded issue_refund ──────────────────────────────────────
 
-  server.registerTool("issue_refund",
+  server.registerTool(
+    "issue_refund",
     {
       title: "Issue refund (guarded)",
       description: `Attempt a refund under the auto-approval policy.
@@ -307,6 +316,7 @@ Behavior:
 
 Use check_refund_eligibility first for investigation. Use resolve_escalation to reject, or to approve only after conditions clear (full policy re-check at execution time).`,
       inputSchema: issueRefundInput,
+      outputSchema: issueRefundOutput,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -330,12 +340,14 @@ Use check_refund_eligibility first for investigation. Use resolve_escalation to 
 
   // ─── Escalation tools ──────────────────────────────────────────────────────
 
-  server.registerTool("list_escalations",
+  server.registerTool(
+    "list_escalations",
     {
       title: "List escalations",
       description:
         "List manager-approval escalations created when issue_refund could not auto-execute. Optionally filter by status.",
       inputSchema: listEscalationsInput,
+      outputSchema: listEscalationsOutput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ status }) => {
@@ -343,12 +355,14 @@ Use check_refund_eligibility first for investigation. Use resolve_escalation to 
     },
   );
 
-  server.registerTool("get_escalation",
+  server.registerTool(
+    "get_escalation",
     {
       title: "Get escalation",
       description:
         "Fetch a single escalation by ID, including failed policy checks.",
       inputSchema: getEscalationInput,
+      outputSchema: getEscalationOutput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ escalationId }) => {
@@ -359,7 +373,8 @@ Use check_refund_eligibility first for investigation. Use resolve_escalation to 
     },
   );
 
-  server.registerTool("resolve_escalation",
+  server.registerTool(
+    "resolve_escalation",
     {
       title: "Resolve escalation (manager)",
       description: `Manager decision on a pending escalation.
@@ -371,6 +386,7 @@ Requires the write secret token (WRITE_TOKEN).
 
 An escalation is NOT authorization to bypass a failed policy check. If checks still fail, the escalation stays pending, no money moves, and any exception refund must be completed outside this automated MCP path.`,
       inputSchema: resolveEscalationInput,
+      outputSchema: resolveEscalationOutput,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,

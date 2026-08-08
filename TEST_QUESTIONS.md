@@ -4,6 +4,8 @@ Connect your AI client to the Streamable HTTP endpoint (`https://ecom-mcp.onrend
 
 **Write tools** (`reset_seed_data`, `issue_refund`, `resolve_escalation`) require the secret **`token`**. Read tools are public.
 
+**Adding a token:** set `WRITE_TOKEN` in `.env` on the server (`openssl rand -hex 24`), then pass the same value as the **`token`** argument in every write-tool call from your client. The server rejects write calls whose token doesn't match.
+
 **Policy (auto-refund needs all of these):** amount ≤ $150 · amount ≤ remaining balance · order ≤ 30 days · customer risk &lt; 70 · verified carrier exception · no duplicate paymentId+amount · payment captured · no chargeback/dispute.
 
 ---
@@ -12,7 +14,7 @@ Connect your AI client to the Streamable HTTP endpoint (`https://ecom-mcp.onrend
 
 ### 0. Reset seed data (between runs)
 
-**Ask:** Reset the synthetic seed data so all scenarios match the original catalog.
+**Ask:** Reset the synthetic seed data so all scenarios match the original catalog. Here is the token: `<INSERT_TOKEN_HERE>`.
 
 **Expect:** Store reloaded; counts for customers/orders/payments/shipments; escalations cleared (except none in seed); pre-seeded refunds restored (e.g. on `ord_already_refunded`, `ord_partial_ok`).
 
@@ -119,19 +121,19 @@ Connect your AI client to the Streamable HTTP endpoint (`https://ecom-mcp.onrend
 
 ### 15. Auto-execute happy path
 
-**Ask:** Issue a $89 refund for `ord_auto_ok`, action `full_refund_damaged`, reason “Damaged earbuds”.
+**Ask:** Issue a $89 refund for `ord_auto_ok`, action `full_refund_damaged`, reason “Damaged earbuds”. Here is the token: `<INSERT_TOKEN_HERE>`.
 
 **Expect:** Outcome **`auto_executed`**; completed refund; money moved.
 
 ### 16. Escalate — over cap
 
-**Ask:** Issue a $249 refund for `ord_over_cap`, action `full_refund_lost`, reason “Lost package”.
+**Ask:** Issue a $249 refund for `ord_over_cap`, action `full_refund_lost`, reason “Lost package”. Here is the token: `<INSERT_TOKEN_HERE>`.
 
 **Expect:** Outcome **`escalated`**; **`amount_cap`** in failed checks; pending escalation; no money moved. Note `escalation.id`.
 
 ### 17. Escalate — another policy fail
 
-**Ask:** Issue a refund for `ord_chargeback`, $120, `full_refund_damaged`, reason “Customer request despite chargeback”.
+**Ask:** Issue a refund for `ord_chargeback`, $120, `full_refund_damaged`, reason “Customer request despite chargeback”. Here is the token: `<INSERT_TOKEN_HERE>`.
 
 **Expect:** **`escalated`** with **`no_chargeback_or_dispute`**; no money moved.
 
@@ -143,7 +145,7 @@ Connect your AI client to the Streamable HTTP endpoint (`https://ecom-mcp.onrend
 
 ### 19. Manager approve does **not** bypass policy
 
-**Ask:** Approve the pending escalation for `ord_over_cap` as manager `mgr_jordan`.
+**Ask:** Approve the pending escalation for `ord_over_cap` as manager `mgr_jordan`. Here is the token: `<INSERT_TOKEN_HERE>`.
 
 **Expect:** **Blocked** — full policy re-check at execution time still fails (`amount_cap`). Escalation remains **pending**; **no money moved**. Escalation is not authorization to override the cap. Exception refunds (if any) stay outside the automated MCP path.
 
@@ -151,7 +153,7 @@ Connect your AI client to the Streamable HTTP endpoint (`https://ecom-mcp.onrend
 
 **Setup:** On a clean server (or after creating a new pending escalation, e.g. issue on `ord_too_old` $45).
 
-**Ask:** Reject that pending escalation as manager `mgr_sam` with note “Outside policy; deny.”
+**Ask:** Reject that pending escalation as manager `mgr_sam` with note “Outside policy; deny.” Here is the token: `<INSERT_TOKEN_HERE>`.
 
 **Expect:** Escalation **rejected**; **no money moved**.
 
@@ -159,7 +161,7 @@ Connect your AI client to the Streamable HTTP endpoint (`https://ecom-mcp.onrend
 
 **Setup:** After Q16 + Q19 (over-cap escalated; approve attempted and blocked).
 
-**Ask:** Issue the same refund again for `ord_over_cap` ($249, `full_refund_lost`).
+**Ask:** Issue the same refund again for `ord_over_cap` ($249, `full_refund_lost`). Here is the token: `<INSERT_TOKEN_HERE>`.
 
 **Expect:** Still **not** auto-executed; escalates again (or remains blocked by policy). Money has not moved from the prior approve attempt.
 
@@ -167,7 +169,7 @@ Connect your AI client to the Streamable HTTP endpoint (`https://ecom-mcp.onrend
 
 **Setup:** Fresh server. Issue a refund that escalates only on risk (e.g. fixture-style high risk that can be lowered — or use client tools if your demo environment can refresh risk). For unit-level behavior: risk fails → escalate → risk drops below 70 → approve.
 
-**Ask (conceptual):** After risk is below 70 and all other gates pass, approve the pending escalation.
+**Ask (conceptual):** After risk is below 70 and all other gates pass, approve the pending escalation. Here is the token: `<INSERT_TOKEN_HERE>`.
 
 **Expect:** Full re-check passes → escalation **approved** → refund completes → money moved. If any gate still fails, same as Q19 (blocked, pending, no money).
 
@@ -183,7 +185,7 @@ These are **full commerce-ops workflows**. Paste one prompt as-is after connecti
 
 **Paste:**
 
-> I'm on commerce ops. Customer Ava Chen says her wireless earbuds arrived damaged and she wants a full refund.  
+> I'm on commerce ops. Customer Ava Chen says her wireless earbuds arrived damaged and she wants a full refund. Here is the token: `<INSERT_TOKEN_HERE>`.
 > Find her order in the catalog, pull order / payment / shipment / risk context, check whether we can auto-refund, and if policy allows, issue the refund with a clear reason.  
 > Summarize what you found, which policy checks passed, and whether money moved.
 
@@ -195,7 +197,7 @@ These are **full commerce-ops workflows**. Paste one prompt as-is after connecti
 
 **Paste:**
 
-> Customer Ava Chen ordered noise-cancelling headphones that the carrier marked lost. She wants a full refund of what she paid.  
+> Customer Ava Chen ordered noise-cancelling headphones that the carrier marked lost. She wants a full refund of what she paid. Here is the token: `<INSERT_TOKEN_HERE>`.
 > Look up the order and payment, check auto-refund eligibility, and attempt the refund if appropriate.  
 > If it cannot auto-approve, open/show the escalation and explain which policy gate failed. Do not invent a bypass.
 
@@ -207,7 +209,7 @@ These are **full commerce-ops workflows**. Paste one prompt as-is after connecti
 
 **Paste:**
 
-> Casey Nguyen contacted support: both phone cases were the wrong item and they want a full refund (~$40).  
+> Casey Nguyen contacted support: both phone cases were the wrong item and they want a full refund (~$40). Here is the token: `<INSERT_TOKEN_HERE>`.
 > Investigate the customer and order, run eligibility, and only issue if auto-eligible. If risk or another gate blocks us, escalate and tell me why in plain language for the manager queue.
 
 **Expect:** Finds `ord_high_risk`. Risk **82** → fails **`customer_risk`** → **`escalated`**; no money moved. Agent should surface risk score vs threshold (&lt; 70).
