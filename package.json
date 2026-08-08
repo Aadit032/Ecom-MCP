@@ -12,7 +12,7 @@
     "typescript": "^5"
   },
   "scripts": {
-    "start": "bun run index.ts",
+    "start": "bunx prisma generate && bunx prisma migrate dev && bun run index.ts",
     "test": "bun test",
     "db:generate": "bunx prisma generate",
     "db:migrate": "bunx prisma migrate dev",

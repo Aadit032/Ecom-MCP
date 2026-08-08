@@ -2,7 +2,6 @@
  * Postgres-backed store via Prisma.
  * Domain methods mirror the former in-memory Store API but are async.
  */
-import { Prisma } from "@prisma/client";
 import { prisma } from "./db.ts";
 import { seedData } from "./seed.ts";
 import type {
@@ -15,12 +14,30 @@ import type {
   Shipment,
 } from "./types.ts";
 
-function money(n: Prisma.Decimal | number | string): number {
+/** Coerce Prisma Decimal / number / string money fields to a 2dp number. */
+function money(n: { toString(): string } | number | string): number {
   return roundMoney(Number(n));
+}
+
+function isUniqueConstraintError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code: unknown }).code === "P2002"
+  );
 }
 
 function roundMoney(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/**
+ * Prisma Json columns expect InputJsonValue (no structural TS types).
+ * Round-trip through JSON so typed arrays/objects are plain JSON values.
+ */
+function toJsonColumn(value: unknown): object {
+  return JSON.parse(JSON.stringify(value)) as object;
 }
 
 function toCustomer(row: {
@@ -61,8 +78,8 @@ function toPayment(row: {
   id: string;
   orderId: string;
   status: string;
-  amountPaid: Prisma.Decimal;
-  amountRefunded: Prisma.Decimal;
+  amountPaid: { toString(): string } | number;
+  amountRefunded: { toString(): string } | number;
   capturedAt: string;
   chargebackFlag: boolean;
   disputeFlag: boolean;
@@ -107,7 +124,7 @@ function toRefund(row: {
   id: string;
   orderId: string;
   paymentId: string;
-  amount: Prisma.Decimal;
+  amount: { toString(): string } | number;
   action: string;
   reason: string;
   status: string;
@@ -133,11 +150,11 @@ function toEscalation(row: {
   id: string;
   orderId: string;
   paymentId: string;
-  requestedAmount: Prisma.Decimal;
+  requestedAmount: { toString(): string } | number;
   action: string;
   reason: string;
   status: string;
-  failedChecks: Prisma.JsonValue;
+  failedChecks: unknown;
   createdAt: string;
   resolvedAt: string | null;
   resolvedBy: string | null;
@@ -280,7 +297,7 @@ export class Store {
           action: e.action,
           reason: e.reason,
           status: e.status,
-          failedChecks: e.failedChecks as unknown as Prisma.InputJsonValue,
+          failedChecks: toJsonColumn(e.failedChecks),
           createdAt: e.createdAt,
           resolvedAt: e.resolvedAt,
           resolvedBy: e.resolvedBy,
@@ -447,12 +464,9 @@ export class Store {
 
         return toRefund(refund);
       });
-    } catch (err) {
+    } catch (err: unknown) {
       // Concurrent create race → return the winner's row.
-      if (
-        err instanceof Prisma.PrismaClientKnownRequestError &&
-        err.code === "P2002"
-      ) {
+      if (isUniqueConstraintError(err)) {
         const again = await this.db.refund.findUnique({
           where: {
             paymentId_amount: {
@@ -485,7 +499,7 @@ export class Store {
         action: input.action,
         reason: input.reason,
         status: "pending",
-        failedChecks: input.failedChecks as unknown as Prisma.InputJsonValue,
+        failedChecks: toJsonColumn(input.failedChecks),
         createdAt: this.nowIso(),
         resolvedAt: null,
         resolvedBy: null,

@@ -3,6 +3,9 @@ script.md
 interview.md
 node_modules
 
+generated/*
+src/generated/*
+
 # output
 out
 dist
