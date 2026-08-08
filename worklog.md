@@ -74,6 +74,10 @@ Past tool prompts needed order IDs up front. I asked the agent to let clients di
 
 The model keyed duplicates on `action` (+ `amount`); since `action` is free-form/caller-supplied, I moved the uniqueness (and DB `@@unique`) to `(paymentId, amount)` based on the suggestions given by the team so a retry or a parallel auto-path can never double-pay — the duplicate-refund escalation tests cover the race. 
 
+### ChatGPT can't call the write tools — opencode is the test client
+
+After deploying, the ChatGPT web app refused every write-tool call because it demands a `writeKey` argument that its safety layer blocks. I stopped treating ChatGPT as the reference client and switched to **opencode** (free models suffice) for all end-to-end write-path testing; this is now called out in the README so future testers don't waste time on the ChatGPT path. 
+
 
 ## How AI-generated work was verified
 
@@ -81,7 +85,7 @@ I made the test suite extensive enough to cover all edge cases which helped me u
 
 I used `@modelcontextprotocol/inspector` to test the tool behaviour before deploying the server.
 
-After deploying I added the server as an MCP connection in ChatGPT and, using the questions from **[TEST_QUESTIONS.md](./TEST_QUESTIONS.md)**, tested the end-to-end workflow.
+After deploying I initially added the server as an MCP connection in ChatGPT and, using the questions from **[TEST_QUESTIONS.md](./TEST_QUESTIONS.md)**, tried to test the end-to-end workflow — **this failed**. The ChatGPT website applies a safety layer that blocks every request that requires a `writeKey` on the write tools (`issue_refund`, `resolve_escalation`, `reset_seed_data`), so none of the write paths could be exercised from there. I switched to testing with **opencode** (free models work fine), where the agent can pass the `writeKey` guardrail normally and the full write-path workflow runs end-to-end.
 
 
 ## Remaining risks or unfinished work

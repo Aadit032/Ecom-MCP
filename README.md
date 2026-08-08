@@ -80,8 +80,10 @@ Source: `src/policy.test.ts` — eligibility, issue/resolve paths, store status 
 
 ### 2. MCP client (manual / interactive)
 
+> **Use opencode to test this server.** OpenAI (the ChatGPT website) applies a safety layer that blocks every request requiring a `writeKey` on the write tools (`issue_refund`, `resolve_escalation`, `reset_seed_data`), so those paths can't be exercised end-to-end from ChatGPT. Testing with **opencode** (free models work fine) bypasses that and lets the agent pass the `writeKey` guardrail normally.
+
 1. Start the server (`bun run start`).
-2. Connect an MCP client to Streamable HTTP at `https://ecom-mcp.onrender.com/mcp`.
+2. Connect an MCP client (opencode) to Streamable HTTP at `https://ecom-mcp.onrender.com/mcp`.
 3. Confirm tools appear.
 4. Use prompts from **[TEST_QUESTIONS.md](./TEST_QUESTIONS.md)**.
 
