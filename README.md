@@ -6,76 +6,92 @@ In online commerce, refund decisions often depend on engineering: ops needs orde
 
 This MCP server flips that. Operations (or an AI agent acting for them) can **look up the same context themselves**, run a **policy eligibility check**, and either **auto-issue a safe refund** or **escalate to a manager** — without waiting on eng for every case. The policy layer is the guardrail: amount caps, balance checks, age, risk, carrier exceptions, duplicates, and dispute flags stop bad refunds from moving money even when a caller asks for them.
 
-All data is local and synthetic. No real payments, credentials, frontend, or auth.
+All domain data is **synthetic** and stored in **Postgres** (Prisma ORM). No real payments or payment-processor credentials. Write tools require a shared secret token.
 
 ## Layout
 
 ```
 index.ts              # Express + Streamable HTTP
+prisma/
+  schema.prisma       # Postgres models + refund idempotency unique
+  migrations/         # Prisma migrations
+scripts/
+  seed.ts             # Load synthetic catalog into Postgres
 src/
   create-server.ts    # Tool registration
   tool-schemas.ts     # Shared Zod input schemas
   types.ts            # Domain types + policy constants
-  seed.ts             # Synthetic catalog
-  store.ts            # In-memory store
+  seed.ts             # Synthetic catalog (source of truth)
+  store.ts            # Prisma-backed async store
   policy.ts           # Eligibility + issue/resolve
+  auth.ts             # Write-token guardrail
+  db.ts               # Prisma client singleton
   policy.test.ts      # Unit tests
+docker-compose.yml    # Local Postgres
+.env.example          # DATABASE_URL + WRITE_TOKEN
 ```
 
-## Transport
-
-**Streamable HTTP** over Express. MCP endpoint: `/mcp`.
+## Setup
 
 ```bash
-bun install
+# 1. Install deps
+bun install   # or: npm install
+
+# 2. Start Postgres (Docker)
+docker compose up -d
+
+# 3. Env
+cp .env.example .env
+# WRITE_TOKEN is already a sample secret in .env after first setup;
+# generate your own: openssl rand -hex 24
+
+# 4. Migrate + seed
+bun run db:migrate
+bun run db:seed
+
+# 5. Run server
 bun run start
 # → http://localhost:3000/mcp
 # → http://localhost:3000/health
 ```
 
-Optional: `PORT` (default `3000`), `HOST` (default `0.0.0.0`).
+| Env | Purpose |
+|-----|---------|
+| `DATABASE_URL` | Postgres connection (default matches `docker-compose.yml`) |
+| `WRITE_TOKEN` | Secret required by write tools |
+| `PORT` | HTTP port (default `3000`) |
+| `HOST` | Bind host (default `0.0.0.0`) |
+
+Scripts: `db:generate`, `db:migrate`, `db:seed`, `db:reset`, `test`, `start`.
 
 ## Testing
 
-Two supported ways to verify behavior. Prefer unit tests for policy coverage; use an MCP client for end-to-end tool walks.
-
 ### 1. Unit tests (`bun test`)
 
-Runs policy eligibility, `issue_refund` auto/escalate/reject paths, store status flips, boundary cases, and manager resolve guards.
+Requires Postgres up and migrations applied (`DATABASE_URL` from `.env`). Each test resets the seed catalog.
 
 ```bash
+docker compose up -d
+bun run db:migrate
 bun test
 ```
 
-Source: `src/policy.test.ts`.
+Source: `src/policy.test.ts` — eligibility, issue/resolve paths, store status flips, idempotency, write-token checks, `reset` seed restore.
 
 ### 2. MCP client (manual / interactive)
 
-1. Start the server:
+1. Start the server (`bun run start`).
+2. Connect an MCP client to Streamable HTTP at `https://ecom-mcp.onrender.com/mcp`.
+3. Confirm tools appear.
+4. Use prompts from **[TEST_QUESTIONS.md](./TEST_QUESTIONS.md)**.
 
-   ```bash
-   bun run start
-   ```
+Suggested flow:
 
-2. Connect an MCP client to the Streamable HTTP endpoint:
-
-   | Client | How |
-   |--------|-----|
-   | **MCP Inspector** | `npx @modelcontextprotocol/inspector` → transport **Streamable HTTP** → URL `https://ecom-mcp.onrender.com/mcp` |
-   | **chatGPT / Claude / any other AI client** | Add a remote MCP server pointing at `https://ecom-mcp.onrender.com/mcp` |
-
-3. Confirm tools appear (`list_orders`, `list_seed_scenarios`, `lookup_*`, `check_refund_eligibility`, `issue_refund`, etc.).
-
-4. Ask natural-language prompts from **[TEST_QUESTIONS.md](./TEST_QUESTIONS.md)** (questions + expected results for AI-client review). Suggested flow:
-
-   1. Call **`list_orders`** when you only have a customer name / item (maps to order ID + customer).
-   2. Or **`list_seed_scenarios`** for expected auto vs escalate outcomes by order ID.
-   3. For a case, **`lookup_order`** / **`lookup_payment`** / **`lookup_shipment`** as needed.
-   4. **`check_refund_eligibility`** (read-only) with `orderId`, `amount`, `action`.
-   5. **`issue_refund`** with the same args plus `reason` — expect `auto_executed` or `escalated`.
-   6. If escalated: **`list_escalations`** or **`get_escalation`**, then **`resolve_escalation`** (`reject`, or `approve` only when conditions can pass a full re-check).
-
-Domain state is **in-process and shared** across tool calls for the life of the server process. Call **`reset_seed_data`** between test runs to restore the seed catalog without restarting (or restart the server).
+1. **`list_orders`** or **`list_seed_scenarios`** to discover order IDs.
+2. **`lookup_*`** / **`check_refund_eligibility`** (public, no token).
+3. **`issue_refund`** with `token` + args — expect `auto_executed` or `escalated`.
+4. If escalated: **`resolve_escalation`** with `token` (`reject`, or `approve` only when full re-check can pass).
+5. Between runs: **`reset_seed_data`** with `token` reloads the seed catalog.
 
 #### Different order cases
 
@@ -92,29 +108,28 @@ Domain state is **in-process and shared** across tool calls for the life of the 
 
 **Escalation round-trip**
 
-1. `issue_refund` on `ord_over_cap` (amount `249`) → note `escalation.id` in the result.
+1. `issue_refund` on `ord_over_cap` (amount `249`, with `token`) → note `escalation.id`.
 2. `get_escalation` → `failedChecks` includes `amount_cap`.
-3. `resolve_escalation` with `decision: "approve"`, `resolvedBy: "mgr_jordan"` → **blocked**: full policy re-check still fails (`amount_cap`); escalation stays **pending**; **no money moved**. Escalation is not a policy override.
-4. `resolve_escalation` with `decision: "reject"` on another pending case (e.g. `ord_too_old`) → closed; no money moved.
-5. Optional: after an underlying condition clears (e.g. risk score refreshed below 70), `approve` re-checks and may complete only if **all** gates pass.
+3. `resolve_escalation` `approve` → **blocked** (re-check still fails); stays **pending**; no money moved.
+4. `resolve_escalation` `reject` on another pending case → closed; no money moved.
 
 ## Tools
 
-| Tool | Type | Purpose |
-|------|------|---------|
-| `reset_seed_data` | write | Reload synthetic seed catalog (demo/test reset) |
-| `list_orders` | read | All orders + linked customer (name, risk) |
-| `list_seed_scenarios` | read | Seed order IDs + expected outcomes |
-| `lookup_order` | read | Order + customer |
-| `lookup_payment` | read | Payment, balance, dispute flags |
-| `lookup_shipment` | read | Shipment + carrier exception |
-| `lookup_customer` | read | Customer risk score |
-| `list_refunds` | read | Refunds for an order |
-| `check_refund_eligibility` | read | Policy report (no side effects) |
-| `issue_refund` | write | Auto-execute **or** escalate |
-| `list_escalations` | read | Escalations |
-| `get_escalation` | read | Escalation detail |
-| `resolve_escalation` | write | Manager reject, or approve with **full policy re-check** (no bypass) |
+| Tool | Type | Auth | Purpose |
+|------|------|------|---------|
+| `reset_seed_data` | write | `token` | Reload synthetic seed catalog |
+| `list_orders` | read | public | All orders + linked customer |
+| `list_seed_scenarios` | read | public | Seed order IDs + expected outcomes |
+| `lookup_order` | read | public | Order + customer |
+| `lookup_payment` | read | public | Payment, balance, dispute flags |
+| `lookup_shipment` | read | public | Shipment + carrier exception |
+| `lookup_customer` | read | public | Customer risk score |
+| `list_refunds` | read | public | Refunds for an order |
+| `check_refund_eligibility` | read | public | Policy report (no side effects) |
+| `issue_refund` | write | `token` | Auto-execute **or** escalate |
+| `list_escalations` | read | public | Escalations |
+| `get_escalation` | read | public | Escalation detail |
+| `resolve_escalation` | write | `token` | Manager reject, or approve with **full re-check** |
 
 ### Auto-refund policy
 
@@ -125,26 +140,31 @@ All of the following must hold:
 3. Order age ≤ **30 days**
 4. Customer risk **&lt; 70**
 5. **Verified carrier exception** on the shipment
-6. No completed refund for the same `action` + `amount`
+6. No completed refund for the same **`paymentId` + `amount`** (idempotency key)
 7. Payment captured, **no chargeback/dispute flags**
 
 Otherwise `issue_refund` escalates and **moves no money**.
 
+### Idempotency
+
+Completed refunds are unique on **`(paymentId, amount)`** (DB constraint + policy check). A retry of the same payment and amount does not double-pay; `recordCompletedRefund` returns the existing refund row.
+
+### Write guardrails
+
+`reset_seed_data`, `issue_refund`, and `resolve_escalation` require a `token` argument matching `WRITE_TOKEN`. Read tools stay public.
+
 ### Manager resolution (`resolve_escalation`)
 
 - **`reject`** — close the escalation; no money moved.
-- **`approve`** — re-run the **full** auto-refund policy at execution time (same gates as above). Money moves **only** if every check passes now.
-- An escalation is **not** authorization to bypass a failed check (amount cap, risk, age, chargeback, etc.). If checks still fail, the escalation stays **pending**, no money moves, and any true exception refund is completed **outside** this automated MCP path.
+- **`approve`** — re-run the **full** auto-refund policy at execution time. Money moves **only** if every check passes now.
+- An escalation is **not** authorization to bypass a failed check.
 
-## Some assumptions / decisions / exclusions for the current scope
+## Assumptions / scope notes
 
-- Assuming USD amounts, two-decimal rounding.
-- `action` is a stable key for duplicate detection **and is supplied by the caller**. Duplicate protection depends on the caller passing the same `action` + `amount` consistently for the same refund reason. (Hard money safety still comes from remaining paid balance — see below.)
-- `riskScore` is assumed to come from an **external risk provider** (e.g. a fraud/risk scoring service keyed on `customerId`). This server does not compute it — it reads the static value from the customer record. In this demo it is hardcoded in the seed data.
-- Carrier exceptions must be present and `exceptionVerified: true`.
-- Chargeback/dispute flags always force escalation (and block approve-time completion until flags clear).
-- Manager approve never overrides policy; it only succeeds when a full re-check would allow auto-refund.
-- No mutators for underlying fail-reasons after escalation. There is no tool to refresh risk scores, clear chargeback/dispute flags, edit carrier exceptions, change order age, etc. In practice you can **escalate** and **reject**, but you usually cannot drive a successful `approve` path for seed cases that fail a sticky gate — those conditions never change inside this server. A later extension could add admin/simulation methods (e.g. set risk score, clear flags) so approve-time re-check becomes demonstrable end-to-end.
-- All domain memory is in-process. Customers, orders, payments, shipments, refunds, and escalations live in a single in-memory store. State is shared across tool calls for the life of the process and is lost on restart (or restored via `reset_seed_data`). No persistence, multi-instance sharing, or durable audit log. A later version could offload this to a DB (SQLite/Postgres/etc.) without changing the tool contracts much.
-- In-memory store resets on process restart.
-- Stateless Streamable HTTP per request; domain state is the shared process store.
+- USD amounts, two-decimal rounding.
+- Idempotency key is **`paymentId` + refund amount** (not `action`).
+- `action` remains a stable audit/escalation label supplied by the caller.
+- `riskScore` is static seed data (stand-in for an external risk provider).
+- Manager approve never overrides policy.
+- Domain state is durable in Postgres and shared across process restarts; use `reset_seed_data` (or `bun run db:seed`) to restore the catalog.
+- Stateless Streamable HTTP per request; domain state lives in Postgres.

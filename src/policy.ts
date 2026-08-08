@@ -11,7 +11,7 @@ import {
 export interface EligibilityInput {
   orderId: string;
   amount: number;
-  /** Stable action key used for duplicate detection (e.g. "full_refund_damaged"). */
+  /** Stable action key used for audit / escalation (e.g. "full_refund_damaged"). */
   action: string;
   /** Free-text reason for audit / escalation. */
   reason?: string;
@@ -26,17 +26,17 @@ export interface EligibilityInput {
  * - order ≤ 30 days old
  * - customer risk < 70
  * - verified carrier exception present
- * - no existing completed refund for the same action + amount
+ * - no existing completed refund for the same paymentId + amount (idempotency key)
  * - payment captured (or partially refunded with headroom)
  * - no chargeback / dispute flag
  */
-export function checkEligibility(
+export async function checkEligibility(
   store: Store,
   input: EligibilityInput,
   now: Date = new Date(),
-): EligibilityResult {
+): Promise<EligibilityResult> {
   const checks: PolicyCheckResult[] = [];
-  const order = store.getOrder(input.orderId);
+  const order = await store.getOrder(input.orderId);
 
   if (!order) {
     const missing: PolicyCheckResult = {
@@ -56,9 +56,9 @@ export function checkEligibility(
     };
   }
 
-  const payment = store.getPaymentByOrder(order.id);
-  const customer = store.getCustomer(order.customerId);
-  const shipment = store.getShipmentByOrder(order.id);
+  const payment = await store.getPaymentByOrder(order.id);
+  const customer = await store.getCustomer(order.customerId);
+  const shipment = await store.getShipmentByOrder(order.id);
   const amount = roundMoney(input.amount);
 
   // payment_captured
@@ -142,7 +142,7 @@ export function checkEligibility(
     } else {
       checks.push({
         code: "not_over_paid",
-        passed: true, 
+        passed: true,
         message: `Requested $${amount.toFixed(2)} ≤ remaining refundable $${remaining.toFixed(2)}.`,
       });
     }
@@ -206,27 +206,33 @@ export function checkEligibility(
     });
   }
 
-  // no_duplicate_refund
-  const existing = store
-    .listRefundsForOrder(order.id)
-    .filter(
-      (r) =>
-        r.status === "completed" &&
-        r.action === input.action &&
-        roundMoney(r.amount) === amount,
-    );
-  if (existing.length > 0) {
+  // no_duplicate_refund — unique key is (paymentId, amount)
+  if (!payment) {
     checks.push({
       code: "no_duplicate_refund",
       passed: false,
-      message: `A completed refund already exists for action '${input.action}' and amount $${amount.toFixed(2)} (ids: ${existing.map((r) => r.id).join(", ")}).`,
+      message: "Cannot check duplicate refunds without a payment.",
     });
   } else {
-    checks.push({
-      code: "no_duplicate_refund",
-      passed: true,
-      message: `No completed refund for action '${input.action}' at $${amount.toFixed(2)}.`,
-    });
+    const existing = (await store.listRefundsForOrder(order.id)).filter(
+      (r) =>
+        r.status === "completed" &&
+        r.paymentId === payment.id &&
+        roundMoney(r.amount) === amount,
+    );
+    if (existing.length > 0) {
+      checks.push({
+        code: "no_duplicate_refund",
+        passed: false,
+        message: `A completed refund already exists for payment '${payment.id}' and amount $${amount.toFixed(2)} (ids: ${existing.map((r) => r.id).join(", ")}).`,
+      });
+    } else {
+      checks.push({
+        code: "no_duplicate_refund",
+        passed: true,
+        message: `No completed refund for payment '${payment.id}' at $${amount.toFixed(2)}.`,
+      });
+    }
   }
 
   const failedChecks = checks.filter((c) => !c.passed);
@@ -251,17 +257,18 @@ export function checkEligibility(
  * Guarded write path:
  * - If all policy checks pass → complete refund immediately (money moves).
  * - If any check fails → open a manager-approval escalation and move no money.
+ * - Idempotent on (paymentId, amount): concurrent/retry auto-executes return the same refund.
  *
  * Never completes a failed-policy refund via elicitation/confirmation.
  */
-export function issueRefund(
+export async function issueRefund(
   store: Store,
   input: EligibilityInput & { reason: string },
   now: Date = new Date(),
-): IssueRefundResult {
-  const eligibility = checkEligibility(store, input, now);
+): Promise<IssueRefundResult> {
+  const eligibility = await checkEligibility(store, input, now);
 
-  if (!eligibility.paymentId || !store.getOrder(input.orderId)) {
+  if (!eligibility.paymentId || !(await store.getOrder(input.orderId))) {
     return {
       outcome: "rejected",
       message: eligibility.summary,
@@ -272,7 +279,7 @@ export function issueRefund(
   }
 
   if (eligibility.eligibleForAutoRefund) {
-    const refund = store.recordCompletedRefund({
+    const refund = await store.recordCompletedRefund({
       orderId: eligibility.orderId,
       paymentId: eligibility.paymentId,
       amount: eligibility.requestedAmount,
@@ -291,7 +298,7 @@ export function issueRefund(
   }
 
   // Policy failure → escalate only. No money moves.
-  const escalation = store.createEscalation({
+  const escalation = await store.createEscalation({
     orderId: eligibility.orderId,
     paymentId: eligibility.paymentId,
     requestedAmount: eligibility.requestedAmount,
@@ -319,7 +326,7 @@ export function issueRefund(
  * - If checks still fail, leave the escalation pending, move no money, and keep any
  *   true exception refund outside the automated MCP path.
  */
-export function resolveEscalation(
+export async function resolveEscalation(
   store: Store,
   input: {
     escalationId: string;
@@ -328,14 +335,14 @@ export function resolveEscalation(
     note?: string;
   },
   now: Date = new Date(),
-): {
+): Promise<{
   ok: boolean;
   message: string;
   escalation: Escalation | null;
   refund: Refund | null;
   eligibility: EligibilityResult | null;
-} {
-  const escalation = store.getEscalation(input.escalationId);
+}> {
+  const escalation = await store.getEscalation(input.escalationId);
   if (!escalation) {
     return {
       ok: false,
@@ -356,22 +363,23 @@ export function resolveEscalation(
   }
 
   if (input.decision === "reject") {
-    escalation.status = "rejected";
-    escalation.resolvedAt = store.nowIso();
-    escalation.resolvedBy = input.resolvedBy;
-    escalation.resolutionNote = input.note ?? "Rejected by manager.";
+    const updated = await store.updateEscalation(escalation.id, {
+      status: "rejected",
+      resolvedAt: store.nowIso(),
+      resolvedBy: input.resolvedBy,
+      resolutionNote: input.note ?? "Rejected by manager.",
+    });
     return {
       ok: true,
-      message: `Escalation ${escalation.id} rejected. No money moved.`,
-      escalation,
+      message: `Escalation ${updated.id} rejected. No money moved.`,
+      escalation: updated,
       refund: null,
       eligibility: null,
     };
   }
 
   // Approve → re-check ALL auto-refund policy conditions at execution time.
-  // Escalation approval never overrides a still-failing policy check.
-  const eligibility = checkEligibility(
+  const eligibility = await checkEligibility(
     store,
     {
       orderId: escalation.orderId,
@@ -382,9 +390,7 @@ export function resolveEscalation(
   );
 
   if (!eligibility.eligibleForAutoRefund) {
-    const failed = eligibility.failedChecks
-      .map((c) => c.code)
-      .join(", ");
+    const failed = eligibility.failedChecks.map((c) => c.code).join(", ");
     return {
       ok: false,
       message: `Approve blocked for ${escalation.id}: policy still fails at execution time (${failed || "unknown"}). Escalation remains pending; no money moved. Automated path will not complete this refund while checks fail — resolve any exception refund outside this MCP.`,
@@ -394,8 +400,7 @@ export function resolveEscalation(
     };
   }
 
-  // Policy now fully passes → complete under the same automated gates as issue_refund.
-  const payment = store.getPayment(escalation.paymentId);
+  const payment = await store.getPayment(escalation.paymentId);
   if (!payment || !eligibility.paymentId) {
     return {
       ok: false,
@@ -406,7 +411,7 @@ export function resolveEscalation(
     };
   }
 
-  const refund = store.recordCompletedRefund({
+  const refund = await store.recordCompletedRefund({
     orderId: escalation.orderId,
     paymentId: eligibility.paymentId,
     amount: escalation.requestedAmount,
@@ -416,25 +421,29 @@ export function resolveEscalation(
     escalationId: escalation.id,
   });
 
-  escalation.status = "approved";
-  escalation.resolvedAt = store.nowIso();
-  escalation.resolvedBy = input.resolvedBy;
-  escalation.resolutionNote =
-    input.note ??
-    "Approved after policy re-check at execution time; all auto-refund checks passed.";
-  escalation.resultingRefundId = refund.id;
+  const updated = await store.updateEscalation(escalation.id, {
+    status: "approved",
+    resolvedAt: store.nowIso(),
+    resolvedBy: input.resolvedBy,
+    resolutionNote:
+      input.note ??
+      "Approved after policy re-check at execution time; all auto-refund checks passed.",
+    resultingRefundId: refund.id,
+  });
 
   return {
     ok: true,
-    message: `Escalation ${escalation.id} approved after full policy re-check. Refund ${refund.id} completed for $${refund.amount.toFixed(2)}. Money moved.`,
-    escalation,
+    message: `Escalation ${updated.id} approved after full policy re-check. Refund ${refund.id} completed for $${refund.amount.toFixed(2)}. Money moved.`,
+    escalation: updated,
     refund,
     eligibility,
   };
 }
 
 function daysBetween(orderDateIso: string, now: Date): number {
-  const orderDate = new Date(orderDateIso.includes("T") ? orderDateIso : `${orderDateIso}T00:00:00.000Z`);
+  const orderDate = new Date(
+    orderDateIso.includes("T") ? orderDateIso : `${orderDateIso}T00:00:00.000Z`,
+  );
   const ms = now.getTime() - orderDate.getTime();
   return Math.floor(ms / (1000 * 60 * 60 * 24));
 }

@@ -4,6 +4,12 @@
  */
 import { z } from "zod";
 
+export const writeTokenField = z.string().min(1).describe("Secret write token (WRITE_TOKEN). Required for mutative tools; not needed for read tools.");
+
+export const resetSeedDataInput = z.object({
+  token: writeTokenField,
+});
+
 export const lookupOrderInput = z.object({
   orderId: z.string().describe("Order ID, e.g. ord_auto_ok"),
 });
@@ -33,11 +39,12 @@ export const checkRefundEligibilityInput = z.object({
     .string()
     .min(1)
     .describe(
-      "Stable action key for duplicate detection, e.g. full_refund_damaged",
+      "Stable action key for audit / escalation, e.g. full_refund_damaged",
     ),
 });
 
 export const issueRefundInput = z.object({
+  token: writeTokenField,
   orderId: z.string().describe("Order ID"),
   amount: z.number().positive().describe("Refund amount in USD"),
   action: z
@@ -59,6 +66,7 @@ export const getEscalationInput = z.object({
 });
 
 export const resolveEscalationInput = z.object({
+  token: writeTokenField,
   escalationId: z.string().describe("Pending escalation ID"),
   decision: z.enum(["approve", "reject"]),
   resolvedBy: z.string().min(1).describe("Manager identifier, e.g. mgr_jordan"),

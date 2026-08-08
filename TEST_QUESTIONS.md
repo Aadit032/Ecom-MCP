@@ -1,8 +1,10 @@
 # MCP Client Test Questions
 
-Connect your AI client to the Streamable HTTP endpoint (`http://localhost:3000/mcp` after `bun run start`). Ask these naturally; the agent should call MCP tools. Before a full pass, call **`reset_seed_data`** (or restart the server) so seed state is clean.
+Connect your AI client to the Streamable HTTP endpoint (`https://ecom-mcp.onrender.com/mcp` after `bun run start`). Ask these naturally; the agent should call MCP tools. Before a full pass, call **`reset_seed_data`** (with the write `token` from `WRITE_TOKEN` / `.env`) so seed state is clean.
 
-**Policy (auto-refund needs all of these):** amount ≤ $150 · amount ≤ remaining balance · order ≤ 30 days · customer risk &lt; 70 · verified carrier exception · no duplicate action+amount · payment captured · no chargeback/dispute.
+**Write tools** (`reset_seed_data`, `issue_refund`, `resolve_escalation`) require the secret **`token`**. Read tools are public.
+
+**Policy (auto-refund needs all of these):** amount ≤ $150 · amount ≤ remaining balance · order ≤ 30 days · customer risk &lt; 70 · verified carrier exception · no duplicate paymentId+amount · payment captured · no chargeback/dispute.
 
 ---
 

@@ -1,4 +1,6 @@
-import { describe, expect, test, beforeEach } from "bun:test";
+import { describe, expect, test, beforeEach, afterAll } from "bun:test";
+import { assertWriteToken } from "./auth.ts";
+import { prisma } from "./db.ts";
 import { Store } from "./store.ts";
 import {
   checkEligibility,
@@ -18,30 +20,27 @@ function daysAgoIso(days: number, now: Date = NOW): string {
 }
 
 /** Install a minimal order graph for edge-case isolation. */
-function installFixture(
+async function installFixture(
   store: Store,
   opts: {
     orderId: string;
-    customer?: Partial<Customer> | null;
+    customer?: Partial<Customer>;
     payment?: Partial<Payment> | null;
     shipment?: Partial<Shipment> | null;
     orderAgeDays?: number;
   },
-): void {
+): Promise<void> {
   const orderId = opts.orderId;
-  const customerId =
-    opts.customer === null ? "cust_missing_ref" : (opts.customer?.id ?? "cust_fix");
+  const customerId = opts.customer?.id ?? "cust_test";
 
-  if (opts.customer !== null) {
-    const customer: Customer = {
-      id: customerId,
-      name: "Fixture Customer",
-      email: "fixture@example.com",
-      riskScore: 20,
-      ...opts.customer,
-    };
-    store.customers.set(customer.id, customer);
-  }
+  const customer: Customer = {
+    id: customerId,
+    name: "Fixture Customer",
+    email: "fixture@example.com",
+    riskScore: 20,
+    ...opts.customer,
+  };
+  await store.upsertCustomer(customer);
 
   const order: Order = {
     id: orderId,
@@ -52,7 +51,7 @@ function installFixture(
     itemDescription: "Fixture item",
     quantity: 1,
   };
-  store.orders.set(orderId, order);
+  await store.upsertOrder(order);
 
   if (opts.payment !== null && opts.payment !== undefined) {
     const payment: Payment = {
@@ -66,9 +65,8 @@ function installFixture(
       disputeFlag: false,
       ...opts.payment,
     };
-    store.payments.set(payment.id, payment);
+    await store.upsertPayment(payment);
   } else if (opts.payment === undefined) {
-    // default: healthy payment
     const payment: Payment = {
       id: `pay_${orderId}`,
       orderId,
@@ -79,9 +77,8 @@ function installFixture(
       chargebackFlag: false,
       disputeFlag: false,
     };
-    store.payments.set(payment.id, payment);
+    await store.upsertPayment(payment);
   }
-  // payment === null → omit payment
 
   if (opts.shipment !== null && opts.shipment !== undefined) {
     const shipment: Shipment = {
@@ -96,7 +93,7 @@ function installFixture(
       deliveredAt: daysAgoIso((opts.orderAgeDays ?? 5) - 2),
       ...opts.shipment,
     };
-    store.shipments.set(shipment.id, shipment);
+    await store.upsertShipment(shipment);
   } else if (opts.shipment === undefined) {
     const shipment: Shipment = {
       id: `shp_${orderId}`,
@@ -109,9 +106,8 @@ function installFixture(
       shippedAt: daysAgoIso((opts.orderAgeDays ?? 5) - 1),
       deliveredAt: daysAgoIso((opts.orderAgeDays ?? 5) - 2),
     };
-    store.shipments.set(shipment.id, shipment);
+    await store.upsertShipment(shipment);
   }
-  // shipment === null → omit shipment
 }
 
 function failedCodes(result: { failedChecks: { code: string }[] }): string[] {
@@ -119,23 +115,25 @@ function failedCodes(result: { failedChecks: { code: string }[] }): string[] {
 }
 
 /** Fresh store seeded relative to the fixed evaluation clock (see NOW). */
-function freshStore(): Store {
+async function freshStore(): Promise<Store> {
   const store = new Store();
-  store.reset(NOW);
+  await store.reset(NOW);
   return store;
 }
+
+afterAll(async () => {
+  await prisma.$disconnect();
+});
 
 describe("checkEligibility — seed scenarios", () => {
   let store: Store;
 
-  beforeEach(() => {
-    // Seed order ages must be relative to NOW, not wall-clock "today".
-    store = freshStore();
+  beforeEach(async () => {
+    store = await freshStore();
   });
 
-  test("ord_auto_ok is eligible for full auto refund", () => {
-    // TEST_QUESTIONS Q8
-    const result = checkEligibility(
+  test("ord_auto_ok is eligible for full auto refund", async () => {
+    const result = await checkEligibility(
       store,
       { orderId: "ord_auto_ok", amount: 89, action: "full_refund_damaged" },
       NOW,
@@ -144,9 +142,8 @@ describe("checkEligibility — seed scenarios", () => {
     expect(result.failedChecks).toHaveLength(0);
   });
 
-  test("amount over $150 fails amount_cap", () => {
-    // TEST_QUESTIONS Q9
-    const result = checkEligibility(
+  test("amount over $150 fails amount_cap", async () => {
+    const result = await checkEligibility(
       store,
       { orderId: "ord_over_cap", amount: 249, action: "full_refund_lost" },
       NOW,
@@ -155,9 +152,8 @@ describe("checkEligibility — seed scenarios", () => {
     expect(failedCodes(result)).toContain("amount_cap");
   });
 
-  test("order older than 30 days fails order_age", () => {
-    // TEST_QUESTIONS Q10
-    const result = checkEligibility(
+  test("order older than 30 days fails order_age", async () => {
+    const result = await checkEligibility(
       store,
       {
         orderId: "ord_too_old",
@@ -170,9 +166,8 @@ describe("checkEligibility — seed scenarios", () => {
     expect(failedCodes(result)).toContain("order_age");
   });
 
-  test("high risk customer fails customer_risk", () => {
-    // TEST_QUESTIONS Q11
-    const result = checkEligibility(
+  test("high risk customer fails customer_risk", async () => {
+    const result = await checkEligibility(
       store,
       {
         orderId: "ord_high_risk",
@@ -185,9 +180,8 @@ describe("checkEligibility — seed scenarios", () => {
     expect(failedCodes(result)).toContain("customer_risk");
   });
 
-  test("missing carrier exception fails carrier_exception", () => {
-    // TEST_QUESTIONS Q11 — action matches the question catalog
-    const result = checkEligibility(
+  test("missing carrier exception fails carrier_exception", async () => {
+    const result = await checkEligibility(
       store,
       { orderId: "ord_no_exception", amount: 64, action: "full_refund_damaged" },
       NOW,
@@ -196,9 +190,8 @@ describe("checkEligibility — seed scenarios", () => {
     expect(failedCodes(result)).toContain("carrier_exception");
   });
 
-  test("duplicate action+amount fails no_duplicate_refund", () => {
-    // TEST_QUESTIONS Q12
-    const result = checkEligibility(
+  test("duplicate paymentId+amount fails no_duplicate_refund", async () => {
+    const result = await checkEligibility(
       store,
       {
         orderId: "ord_already_refunded",
@@ -211,9 +204,8 @@ describe("checkEligibility — seed scenarios", () => {
     expect(failedCodes(result)).toContain("no_duplicate_refund");
   });
 
-  test("chargeback flag fails no_chargeback_or_dispute", () => {
-    // TEST_QUESTIONS Q11
-    const result = checkEligibility(
+  test("chargeback flag fails no_chargeback_or_dispute", async () => {
+    const result = await checkEligibility(
       store,
       {
         orderId: "ord_chargeback",
@@ -226,9 +218,8 @@ describe("checkEligibility — seed scenarios", () => {
     expect(failedCodes(result)).toContain("no_chargeback_or_dispute");
   });
 
-  test("amount greater than remaining paid balance fails not_over_paid", () => {
-    // TEST_QUESTIONS Q14 — only ~$60 remains on ord_partial_ok
-    const result = checkEligibility(
+  test("amount greater than remaining paid balance fails not_over_paid", async () => {
+    const result = await checkEligibility(
       store,
       { orderId: "ord_partial_ok", amount: 70, action: "full_refund_damaged" },
       NOW,
@@ -237,9 +228,8 @@ describe("checkEligibility — seed scenarios", () => {
     expect(failedCodes(result)).toContain("not_over_paid");
   });
 
-  test("partial remaining within policy is eligible", () => {
-    // TEST_QUESTIONS Q13
-    const result = checkEligibility(
+  test("partial remaining within policy is eligible", async () => {
+    const result = await checkEligibility(
       store,
       {
         orderId: "ord_partial_ok",
@@ -255,12 +245,12 @@ describe("checkEligibility — seed scenarios", () => {
 describe("checkEligibility — missing graph nodes", () => {
   let store: Store;
 
-  beforeEach(() => {
-    store = freshStore();
+  beforeEach(async () => {
+    store = await freshStore();
   });
 
-  test("unknown order is not eligible", () => {
-    const result = checkEligibility(
+  test("unknown order is not eligible", async () => {
+    const result = await checkEligibility(
       store,
       { orderId: "ord_missing", amount: 10, action: "x" },
       NOW,
@@ -270,9 +260,9 @@ describe("checkEligibility — missing graph nodes", () => {
     expect(result.summary).toContain("does not exist");
   });
 
-  test("missing payment fails payment_captured and related checks", () => {
-    installFixture(store, { orderId: "ord_no_pay", payment: null });
-    const result = checkEligibility(
+  test("missing payment fails payment_captured and related checks", async () => {
+    await installFixture(store, { orderId: "ord_no_pay", payment: null });
+    const result = await checkEligibility(
       store,
       { orderId: "ord_no_pay", amount: 25, action: "refund" },
       NOW,
@@ -284,29 +274,12 @@ describe("checkEligibility — missing graph nodes", () => {
     expect(result.paymentId).toBe("");
   });
 
-  test("missing customer fails customer_risk", () => {
-    installFixture(store, {
-      orderId: "ord_orphan_cust",
-      customer: null,
-    });
-    const result = checkEligibility(
-      store,
-      { orderId: "ord_orphan_cust", amount: 25, action: "refund" },
-      NOW,
-    );
-    expect(result.eligibleForAutoRefund).toBe(false);
-    expect(failedCodes(result)).toContain("customer_risk");
-    expect(
-      result.failedChecks.find((c) => c.code === "customer_risk")!.message,
-    ).toContain("not found");
-  });
-
-  test("missing shipment fails carrier_exception", () => {
-    installFixture(store, {
+  test("missing shipment fails carrier_exception", async () => {
+    await installFixture(store, {
       orderId: "ord_no_ship",
       shipment: null,
     });
-    const result = checkEligibility(
+    const result = await checkEligibility(
       store,
       { orderId: "ord_no_ship", amount: 25, action: "refund" },
       NOW,
@@ -318,15 +291,15 @@ describe("checkEligibility — missing graph nodes", () => {
     ).toContain("No shipment found");
   });
 
-  test("unverified carrier exception fails carrier_exception", () => {
-    installFixture(store, {
+  test("unverified carrier exception fails carrier_exception", async () => {
+    await installFixture(store, {
       orderId: "ord_unverified_exc",
       shipment: {
         carrierException: "damaged",
         exceptionVerified: false,
       },
     });
-    const result = checkEligibility(
+    const result = await checkEligibility(
       store,
       { orderId: "ord_unverified_exc", amount: 25, action: "refund" },
       NOW,
@@ -335,8 +308,8 @@ describe("checkEligibility — missing graph nodes", () => {
     expect(failedCodes(result)).toContain("carrier_exception");
   });
 
-  test("null exception with verified=true still fails carrier_exception", () => {
-    installFixture(store, {
+  test("null exception with verified=true still fails carrier_exception", async () => {
+    await installFixture(store, {
       orderId: "ord_null_exc",
       shipment: {
         carrierException: null,
@@ -344,7 +317,7 @@ describe("checkEligibility — missing graph nodes", () => {
         status: "delivered",
       },
     });
-    const result = checkEligibility(
+    const result = await checkEligibility(
       store,
       { orderId: "ord_null_exc", amount: 25, action: "refund" },
       NOW,
@@ -356,16 +329,16 @@ describe("checkEligibility — missing graph nodes", () => {
 describe("checkEligibility — payment status", () => {
   let store: Store;
 
-  beforeEach(() => {
-    store = freshStore();
+  beforeEach(async () => {
+    store = await freshStore();
   });
 
-  test("authorized payment fails payment_captured", () => {
-    installFixture(store, {
+  test("authorized payment fails payment_captured", async () => {
+    await installFixture(store, {
       orderId: "ord_auth_only",
       payment: { status: "authorized", amountPaid: 50, amountRefunded: 0 },
     });
-    const result = checkEligibility(
+    const result = await checkEligibility(
       store,
       { orderId: "ord_auth_only", amount: 25, action: "refund" },
       NOW,
@@ -376,12 +349,12 @@ describe("checkEligibility — payment status", () => {
     ).toContain("authorized");
   });
 
-  test("failed payment fails payment_captured", () => {
-    installFixture(store, {
+  test("failed payment fails payment_captured", async () => {
+    await installFixture(store, {
       orderId: "ord_pay_failed",
       payment: { status: "failed", amountPaid: 0, amountRefunded: 0 },
     });
-    const result = checkEligibility(
+    const result = await checkEligibility(
       store,
       { orderId: "ord_pay_failed", amount: 10, action: "refund" },
       NOW,
@@ -392,8 +365,8 @@ describe("checkEligibility — payment status", () => {
     ).toContain("failed");
   });
 
-  test("partially_refunded with headroom can pass payment_captured", () => {
-    installFixture(store, {
+  test("partially_refunded with headroom can pass payment_captured", async () => {
+    await installFixture(store, {
       orderId: "ord_partial_status",
       payment: {
         status: "partially_refunded",
@@ -401,7 +374,7 @@ describe("checkEligibility — payment status", () => {
         amountRefunded: 40,
       },
     });
-    const result = checkEligibility(
+    const result = await checkEligibility(
       store,
       { orderId: "ord_partial_status", amount: 50, action: "more" },
       NOW,
@@ -416,16 +389,16 @@ describe("checkEligibility — payment status", () => {
 describe("checkEligibility — amount_cap edge values", () => {
   let store: Store;
 
-  beforeEach(() => {
-    store = freshStore();
-    installFixture(store, {
+  beforeEach(async () => {
+    store = await freshStore();
+    await installFixture(store, {
       orderId: "ord_cap",
       payment: { amountPaid: 200, amountRefunded: 0 },
     });
   });
 
-  test("amount <= 0 fails amount_cap", () => {
-    const zero = checkEligibility(
+  test("amount <= 0 fails amount_cap", async () => {
+    const zero = await checkEligibility(
       store,
       { orderId: "ord_cap", amount: 0, action: "z" },
       NOW,
@@ -435,7 +408,7 @@ describe("checkEligibility — amount_cap edge values", () => {
       zero.failedChecks.find((c) => c.code === "amount_cap")!.message,
     ).toContain("must be positive");
 
-    const negative = checkEligibility(
+    const negative = await checkEligibility(
       store,
       { orderId: "ord_cap", amount: -5, action: "z" },
       NOW,
@@ -443,8 +416,8 @@ describe("checkEligibility — amount_cap edge values", () => {
     expect(failedCodes(negative)).toContain("amount_cap");
   });
 
-  test("exactly $150 passes amount_cap (inclusive boundary)", () => {
-    const result = checkEligibility(
+  test("exactly $150 passes amount_cap (inclusive boundary)", async () => {
+    const result = await checkEligibility(
       store,
       { orderId: "ord_cap", amount: POLICY.maxAutoRefundUsd, action: "cap" },
       NOW,
@@ -455,8 +428,8 @@ describe("checkEligibility — amount_cap edge values", () => {
     expect(result.eligibleForAutoRefund).toBe(true);
   });
 
-  test("$150.01 fails amount_cap", () => {
-    const result = checkEligibility(
+  test("$150.01 fails amount_cap", async () => {
+    const result = await checkEligibility(
       store,
       {
         orderId: "ord_cap",
@@ -472,16 +445,16 @@ describe("checkEligibility — amount_cap edge values", () => {
 describe("checkEligibility — order age and risk boundaries", () => {
   let store: Store;
 
-  beforeEach(() => {
-    store = freshStore();
+  beforeEach(async () => {
+    store = await freshStore();
   });
 
-  test("exactly 30 days old passes order_age (inclusive)", () => {
-    installFixture(store, {
+  test("exactly 30 days old passes order_age (inclusive)", async () => {
+    await installFixture(store, {
       orderId: "ord_age_30",
       orderAgeDays: POLICY.maxOrderAgeDays,
     });
-    const result = checkEligibility(
+    const result = await checkEligibility(
       store,
       { orderId: "ord_age_30", amount: 20, action: "a" },
       NOW,
@@ -492,12 +465,12 @@ describe("checkEligibility — order age and risk boundaries", () => {
     expect(result.eligibleForAutoRefund).toBe(true);
   });
 
-  test("31 days old fails order_age", () => {
-    installFixture(store, {
+  test("31 days old fails order_age", async () => {
+    await installFixture(store, {
       orderId: "ord_age_31",
       orderAgeDays: POLICY.maxOrderAgeDays + 1,
     });
-    const result = checkEligibility(
+    const result = await checkEligibility(
       store,
       { orderId: "ord_age_31", amount: 20, action: "a" },
       NOW,
@@ -505,13 +478,12 @@ describe("checkEligibility — order age and risk boundaries", () => {
     expect(failedCodes(result)).toContain("order_age");
   });
 
-  test("injected now clock changes age outcome", () => {
-    installFixture(store, {
+  test("injected now clock changes age outcome", async () => {
+    await installFixture(store, {
       orderId: "ord_clock",
       orderAgeDays: 10,
     });
-    // With NOW, order is 10 days old → pass
-    const young = checkEligibility(
+    const young = await checkEligibility(
       store,
       { orderId: "ord_clock", amount: 20, action: "a" },
       NOW,
@@ -520,10 +492,9 @@ describe("checkEligibility — order age and risk boundaries", () => {
       true,
     );
 
-    // Same order evaluated 40 days later → fail
     const later = new Date(NOW);
     later.setUTCDate(later.getUTCDate() + 40);
-    const old = checkEligibility(
+    const old = await checkEligibility(
       store,
       { orderId: "ord_clock", amount: 20, action: "a" },
       later,
@@ -531,12 +502,12 @@ describe("checkEligibility — order age and risk boundaries", () => {
     expect(failedCodes(old)).toContain("order_age");
   });
 
-  test("risk exactly 70 fails customer_risk (exclusive threshold)", () => {
-    installFixture(store, {
+  test("risk exactly 70 fails customer_risk (exclusive threshold)", async () => {
+    await installFixture(store, {
       orderId: "ord_risk_70",
       customer: { id: "cust_70", riskScore: POLICY.maxCustomerRiskExclusive },
     });
-    const result = checkEligibility(
+    const result = await checkEligibility(
       store,
       { orderId: "ord_risk_70", amount: 20, action: "a" },
       NOW,
@@ -544,15 +515,15 @@ describe("checkEligibility — order age and risk boundaries", () => {
     expect(failedCodes(result)).toContain("customer_risk");
   });
 
-  test("risk 69 passes customer_risk", () => {
-    installFixture(store, {
+  test("risk 69 passes customer_risk", async () => {
+    await installFixture(store, {
       orderId: "ord_risk_69",
       customer: {
         id: "cust_69",
         riskScore: POLICY.maxCustomerRiskExclusive - 1,
       },
     });
-    const result = checkEligibility(
+    const result = await checkEligibility(
       store,
       { orderId: "ord_risk_69", amount: 20, action: "a" },
       NOW,
@@ -563,13 +534,12 @@ describe("checkEligibility — order age and risk boundaries", () => {
     expect(result.eligibleForAutoRefund).toBe(true);
   });
 
-  test("amount equal to remaining balance passes not_over_paid", () => {
-    installFixture(store, {
+  test("amount equal to remaining balance passes not_over_paid", async () => {
+    await installFixture(store, {
       orderId: "ord_exact_bal",
       payment: { amountPaid: 80, amountRefunded: 30 },
     });
-    // remaining = 50
-    const result = checkEligibility(
+    const result = await checkEligibility(
       store,
       { orderId: "ord_exact_bal", amount: 50, action: "exact" },
       NOW,
@@ -580,12 +550,12 @@ describe("checkEligibility — order age and risk boundaries", () => {
     expect(result.eligibleForAutoRefund).toBe(true);
   });
 
-  test("disputeFlag alone fails no_chargeback_or_dispute", () => {
-    installFixture(store, {
+  test("disputeFlag alone fails no_chargeback_or_dispute", async () => {
+    await installFixture(store, {
       orderId: "ord_dispute_only",
       payment: { disputeFlag: true, chargebackFlag: false },
     });
-    const result = checkEligibility(
+    const result = await checkEligibility(
       store,
       { orderId: "ord_dispute_only", amount: 20, action: "a" },
       NOW,
@@ -597,16 +567,15 @@ describe("checkEligibility — order age and risk boundaries", () => {
 describe("issueRefund write path", () => {
   let store: Store;
 
-  beforeEach(() => {
-    store = freshStore();
+  beforeEach(async () => {
+    store = await freshStore();
   });
 
-  test("auto-executes when all checks pass and moves money", () => {
-    // TEST_QUESTIONS Q15
-    const before = store.getPaymentByOrder("ord_auto_ok")!;
+  test("auto-executes when all checks pass and moves money", async () => {
+    const before = (await store.getPaymentByOrder("ord_auto_ok"))!;
     expect(before.amountRefunded).toBe(0);
 
-    const result = issueRefund(
+    const result = await issueRefund(
       store,
       {
         orderId: "ord_auto_ok",
@@ -622,14 +591,48 @@ describe("issueRefund write path", () => {
     expect(result.escalation).toBeNull();
     expect(result.refund!.autoApproved).toBe(true);
 
-    const after = store.getPaymentByOrder("ord_auto_ok")!;
+    const after = (await store.getPaymentByOrder("ord_auto_ok"))!;
     expect(after.amountRefunded).toBe(89);
     expect(after.status).toBe("refunded");
-    expect(store.getOrder("ord_auto_ok")!.status).toBe("refunded");
+    expect((await store.getOrder("ord_auto_ok"))!.status).toBe("refunded");
   });
 
-  test("nonexistent order is rejected (no refund, no escalation)", () => {
-    const result = issueRefund(
+  test("idempotent: same paymentId+amount does not double-pay", async () => {
+    const first = await issueRefund(
+      store,
+      {
+        orderId: "ord_auto_ok",
+        amount: 89,
+        action: "full_refund_damaged",
+        reason: "Damaged earbuds",
+      },
+      NOW,
+    );
+    expect(first.outcome).toBe("auto_executed");
+    const refundId = first.refund!.id;
+
+    // Second call is blocked by policy (duplicate) and escalates — money stays at 89.
+    // Direct store path: recordCompletedRefund is idempotent if race past check.
+    const again = await store.recordCompletedRefund({
+      orderId: "ord_auto_ok",
+      paymentId: "pay_auto_ok",
+      amount: 89,
+      action: "full_refund_damaged",
+      reason: "retry",
+      autoApproved: true,
+      escalationId: null,
+    });
+    expect(again.id).toBe(refundId);
+    expect((await store.getPaymentByOrder("ord_auto_ok"))!.amountRefunded).toBe(
+      89,
+    );
+
+    const refunds = await store.listRefundsForOrder("ord_auto_ok");
+    expect(refunds.filter((r) => r.amount === 89)).toHaveLength(1);
+  });
+
+  test("nonexistent order is rejected (no refund, no escalation)", async () => {
+    const result = await issueRefund(
       store,
       {
         orderId: "ord_does_not_exist",
@@ -642,12 +645,12 @@ describe("issueRefund write path", () => {
     expect(result.outcome).toBe("rejected");
     expect(result.refund).toBeNull();
     expect(result.escalation).toBeNull();
-    expect(store.listEscalations()).toHaveLength(0);
+    expect(await store.listEscalations()).toHaveLength(0);
   });
 
-  test("order with no payment is rejected (cannot escalate without paymentId)", () => {
-    installFixture(store, { orderId: "ord_reject_nopay", payment: null });
-    const result = issueRefund(
+  test("order with no payment is rejected (cannot escalate without paymentId)", async () => {
+    await installFixture(store, { orderId: "ord_reject_nopay", payment: null });
+    const result = await issueRefund(
       store,
       {
         orderId: "ord_reject_nopay",
@@ -662,12 +665,11 @@ describe("issueRefund write path", () => {
     expect(result.escalation).toBeNull();
   });
 
-  test("policy failure creates escalation and does not move money", () => {
-    // TEST_QUESTIONS Q16
-    const before = store.getPaymentByOrder("ord_over_cap")!;
+  test("policy failure creates escalation and does not move money", async () => {
+    const before = (await store.getPaymentByOrder("ord_over_cap"))!;
     const refundedBefore = before.amountRefunded;
 
-    const result = issueRefund(
+    const result = await issueRefund(
       store,
       {
         orderId: "ord_over_cap",
@@ -685,13 +687,12 @@ describe("issueRefund write path", () => {
     expect(result.escalation!.failedChecks.length).toBeGreaterThan(0);
     expect(failedCodes(result.eligibility)).toContain("amount_cap");
 
-    const after = store.getPaymentByOrder("ord_over_cap")!;
+    const after = (await store.getPaymentByOrder("ord_over_cap"))!;
     expect(after.amountRefunded).toBe(refundedBefore);
   });
 
-  test("chargeback issue escalates with no money movement", () => {
-    // TEST_QUESTIONS Q17
-    const result = issueRefund(
+  test("chargeback issue escalates with no money movement", async () => {
+    const result = await issueRefund(
       store,
       {
         orderId: "ord_chargeback",
@@ -706,12 +707,14 @@ describe("issueRefund write path", () => {
     expect(failedCodes(result.eligibility)).toContain(
       "no_chargeback_or_dispute",
     );
-    expect(store.getPaymentByOrder("ord_chargeback")!.amountRefunded).toBe(0);
+    expect(
+      (await store.getPaymentByOrder("ord_chargeback"))!.amountRefunded,
+    ).toBe(0);
   });
 
-  test("zero amount escalates (policy fail) rather than auto-executing", () => {
-    installFixture(store, { orderId: "ord_zero" });
-    const result = issueRefund(
+  test("zero amount escalates (policy fail) rather than auto-executing", async () => {
+    await installFixture(store, { orderId: "ord_zero" });
+    const result = await issueRefund(
       store,
       {
         orderId: "ord_zero",
@@ -723,11 +726,11 @@ describe("issueRefund write path", () => {
     );
     expect(result.outcome).toBe("escalated");
     expect(result.refund).toBeNull();
-    expect(store.getPaymentByOrder("ord_zero")!.amountRefunded).toBe(0);
+    expect((await store.getPaymentByOrder("ord_zero"))!.amountRefunded).toBe(0);
   });
 
-  test("high risk escalates with no money movement", () => {
-    const result = issueRefund(
+  test("high risk escalates with no money movement", async () => {
+    const result = await issueRefund(
       store,
       {
         orderId: "ord_high_risk",
@@ -738,12 +741,14 @@ describe("issueRefund write path", () => {
       NOW,
     );
     expect(result.outcome).toBe("escalated");
-    expect(store.getPaymentByOrder("ord_high_risk")!.amountRefunded).toBe(0);
-    expect(store.listEscalations("pending")).toHaveLength(1);
+    expect(
+      (await store.getPaymentByOrder("ord_high_risk"))!.amountRefunded,
+    ).toBe(0);
+    expect(await store.listEscalations("pending")).toHaveLength(1);
   });
 
-  test("duplicate refund escalates without double-paying", () => {
-    const result = issueRefund(
+  test("duplicate refund escalates without double-paying", async () => {
+    const result = await issueRefund(
       store,
       {
         orderId: "ord_already_refunded",
@@ -755,17 +760,17 @@ describe("issueRefund write path", () => {
     );
     expect(result.outcome).toBe("escalated");
     expect(
-      store.getPaymentByOrder("ord_already_refunded")!.amountRefunded,
+      (await store.getPaymentByOrder("ord_already_refunded"))!.amountRefunded,
     ).toBe(79);
   });
 
-  test("partial refund marks payment partially_refunded and leaves order not fully refunded", () => {
-    installFixture(store, {
+  test("partial refund marks payment partially_refunded and leaves order not fully refunded", async () => {
+    await installFixture(store, {
       orderId: "ord_partial_move",
       payment: { amountPaid: 100, amountRefunded: 0, status: "captured" },
     });
 
-    const result = issueRefund(
+    const result = await issueRefund(
       store,
       {
         orderId: "ord_partial_move",
@@ -777,14 +782,14 @@ describe("issueRefund write path", () => {
     );
 
     expect(result.outcome).toBe("auto_executed");
-    const payment = store.getPaymentByOrder("ord_partial_move")!;
+    const payment = (await store.getPaymentByOrder("ord_partial_move"))!;
     expect(payment.amountRefunded).toBe(40);
     expect(payment.status).toBe("partially_refunded");
-    expect(store.getOrder("ord_partial_move")!.status).toBe("delivered");
+    expect((await store.getOrder("ord_partial_move"))!.status).toBe("delivered");
   });
 
-  test("full remaining refund flips payment and order to refunded", () => {
-    installFixture(store, {
+  test("full remaining refund flips payment and order to refunded", async () => {
+    await installFixture(store, {
       orderId: "ord_full_flip",
       payment: {
         amountPaid: 100,
@@ -793,7 +798,7 @@ describe("issueRefund write path", () => {
       },
     });
 
-    const result = issueRefund(
+    const result = await issueRefund(
       store,
       {
         orderId: "ord_full_flip",
@@ -805,18 +810,18 @@ describe("issueRefund write path", () => {
     );
 
     expect(result.outcome).toBe("auto_executed");
-    const payment = store.getPaymentByOrder("ord_full_flip")!;
+    const payment = (await store.getPaymentByOrder("ord_full_flip"))!;
     expect(payment.amountRefunded).toBe(100);
     expect(payment.status).toBe("refunded");
-    expect(store.getOrder("ord_full_flip")!.status).toBe("refunded");
+    expect((await store.getOrder("ord_full_flip"))!.status).toBe("refunded");
   });
 
-  test("authorized payment escalates (payment exists) and moves no money", () => {
-    installFixture(store, {
+  test("authorized payment escalates (payment exists) and moves no money", async () => {
+    await installFixture(store, {
       orderId: "ord_auth_issue",
       payment: { status: "authorized", amountPaid: 50 },
     });
-    const result = issueRefund(
+    const result = await issueRefund(
       store,
       {
         orderId: "ord_auth_issue",
@@ -827,15 +832,17 @@ describe("issueRefund write path", () => {
       NOW,
     );
     expect(result.outcome).toBe("escalated");
-    expect(store.getPaymentByOrder("ord_auth_issue")!.amountRefunded).toBe(0);
+    expect(
+      (await store.getPaymentByOrder("ord_auth_issue"))!.amountRefunded,
+    ).toBe(0);
   });
 
-  test("exactly $150 auto-executes when other checks pass", () => {
-    installFixture(store, {
+  test("exactly $150 auto-executes when other checks pass", async () => {
+    await installFixture(store, {
       orderId: "ord_150",
       payment: { amountPaid: 200, amountRefunded: 0 },
     });
-    const result = issueRefund(
+    const result = await issueRefund(
       store,
       {
         orderId: "ord_150",
@@ -846,16 +853,18 @@ describe("issueRefund write path", () => {
       NOW,
     );
     expect(result.outcome).toBe("auto_executed");
-    expect(store.getPaymentByOrder("ord_150")!.amountRefunded).toBe(150);
-    expect(store.getPaymentByOrder("ord_150")!.status).toBe(
+    expect((await store.getPaymentByOrder("ord_150"))!.amountRefunded).toBe(
+      150,
+    );
+    expect((await store.getPaymentByOrder("ord_150"))!.status).toBe(
       "partially_refunded",
     );
   });
 
-  test("same action different amount is not treated as duplicate", () => {
-    // ord_already_refunded has completed refund action full_refund_damaged @ $79
+  test("same payment different amount is not treated as duplicate", async () => {
+    // ord_already_refunded has completed refund @ $79 for pay_already_refunded
     // A different amount should not hit no_duplicate_refund — but remaining is 0
-    const result = checkEligibility(
+    const result = await checkEligibility(
       store,
       {
         orderId: "ord_already_refunded",
@@ -872,13 +881,12 @@ describe("issueRefund write path", () => {
 describe("resolveEscalation", () => {
   let store: Store;
 
-  beforeEach(() => {
-    store = freshStore();
+  beforeEach(async () => {
+    store = await freshStore();
   });
 
-  test("approve does not bypass still-failing policy (amount_cap) — no money moved", () => {
-    // TEST_QUESTIONS Q19 (after Q16)
-    const issued = issueRefund(
+  test("approve does not bypass still-failing policy (amount_cap) — no money moved", async () => {
+    const issued = await issueRefund(
       store,
       {
         orderId: "ord_over_cap",
@@ -890,9 +898,10 @@ describe("resolveEscalation", () => {
     );
     expect(issued.outcome).toBe("escalated");
     const escId = issued.escalation!.id;
-    const refundedBefore = store.getPaymentByOrder("ord_over_cap")!.amountRefunded;
+    const refundedBefore = (await store.getPaymentByOrder("ord_over_cap"))!
+      .amountRefunded;
 
-    const resolved = resolveEscalation(
+    const resolved = await resolveEscalation(
       store,
       {
         escalationId: escId,
@@ -907,17 +916,15 @@ describe("resolveEscalation", () => {
     expect(resolved.refund).toBeNull();
     expect(resolved.eligibility).not.toBeNull();
     expect(failedCodes(resolved.eligibility!)).toContain("amount_cap");
-    // Escalation is not authorization to bypass — stays pending for retry/outside process
-    expect(store.getEscalation(escId)!.status).toBe("pending");
-    expect(store.getPaymentByOrder("ord_over_cap")!.amountRefunded).toBe(
-      refundedBefore,
-    );
+    expect((await store.getEscalation(escId))!.status).toBe("pending");
+    expect(
+      (await store.getPaymentByOrder("ord_over_cap"))!.amountRefunded,
+    ).toBe(refundedBefore);
     expect(resolved.message.toLowerCase()).toContain("policy still fails");
   });
 
-  test("over-cap still not auto-payable after blocked approve (re-issue escalates)", () => {
-    // TEST_QUESTIONS Q21 — Q16 + Q19 then issue again
-    const first = issueRefund(
+  test("over-cap still not auto-payable after blocked approve (re-issue escalates)", async () => {
+    const first = await issueRefund(
       store,
       {
         orderId: "ord_over_cap",
@@ -930,7 +937,7 @@ describe("resolveEscalation", () => {
     expect(first.outcome).toBe("escalated");
     const escId = first.escalation!.id;
 
-    const blocked = resolveEscalation(
+    const blocked = await resolveEscalation(
       store,
       {
         escalationId: escId,
@@ -941,10 +948,12 @@ describe("resolveEscalation", () => {
       NOW,
     );
     expect(blocked.ok).toBe(false);
-    expect(store.getEscalation(escId)!.status).toBe("pending");
-    expect(store.getPaymentByOrder("ord_over_cap")!.amountRefunded).toBe(0);
+    expect((await store.getEscalation(escId))!.status).toBe("pending");
+    expect(
+      (await store.getPaymentByOrder("ord_over_cap"))!.amountRefunded,
+    ).toBe(0);
 
-    const second = issueRefund(
+    const second = await issueRefund(
       store,
       {
         orderId: "ord_over_cap",
@@ -957,18 +966,19 @@ describe("resolveEscalation", () => {
     expect(second.outcome).toBe("escalated");
     expect(second.refund).toBeNull();
     expect(failedCodes(second.eligibility)).toContain("amount_cap");
-    expect(store.getPaymentByOrder("ord_over_cap")!.amountRefunded).toBe(0);
+    expect(
+      (await store.getPaymentByOrder("ord_over_cap"))!.amountRefunded,
+    ).toBe(0);
   });
 
-  test("approve completes refund only after full policy re-check passes", () => {
-    // TEST_QUESTIONS Q22
-    installFixture(store, {
+  test("approve completes refund only after full policy re-check passes", async () => {
+    await installFixture(store, {
       orderId: "ord_risk_then_clear",
       payment: { amountPaid: 80, amountRefunded: 0 },
       customer: { id: "cust_risk_clear", riskScore: 90 },
     });
 
-    const issued = issueRefund(
+    const issued = await issueRefund(
       store,
       {
         orderId: "ord_risk_then_clear",
@@ -981,10 +991,9 @@ describe("resolveEscalation", () => {
     expect(issued.outcome).toBe("escalated");
     const escId = issued.escalation!.id;
 
-    // Underlying condition clears (e.g. risk provider refresh) before manager approve
-    store.customers.get("cust_risk_clear")!.riskScore = 20;
+    await store.updateCustomerRisk("cust_risk_clear", 20);
 
-    const resolved = resolveEscalation(
+    const resolved = await resolveEscalation(
       store,
       {
         escalationId: escId,
@@ -1000,15 +1009,14 @@ describe("resolveEscalation", () => {
     expect(resolved.refund!.autoApproved).toBe(false);
     expect(resolved.refund!.escalationId).toBe(escId);
     expect(resolved.eligibility!.eligibleForAutoRefund).toBe(true);
-    expect(store.getPaymentByOrder("ord_risk_then_clear")!.amountRefunded).toBe(
-      50,
-    );
-    expect(store.getEscalation(escId)!.status).toBe("approved");
+    expect(
+      (await store.getPaymentByOrder("ord_risk_then_clear"))!.amountRefunded,
+    ).toBe(50);
+    expect((await store.getEscalation(escId))!.status).toBe("approved");
   });
 
-  test("manager reject leaves money unmoved", () => {
-    // TEST_QUESTIONS Q20
-    const issued = issueRefund(
+  test("manager reject leaves money unmoved", async () => {
+    const issued = await issueRefund(
       store,
       {
         orderId: "ord_too_old",
@@ -1021,7 +1029,7 @@ describe("resolveEscalation", () => {
     expect(issued.outcome).toBe("escalated");
     const escId = issued.escalation!.id;
 
-    const resolved = resolveEscalation(
+    const resolved = await resolveEscalation(
       store,
       {
         escalationId: escId,
@@ -1035,12 +1043,14 @@ describe("resolveEscalation", () => {
     expect(resolved.ok).toBe(true);
     expect(resolved.refund).toBeNull();
     expect(resolved.eligibility).toBeNull();
-    expect(store.getPaymentByOrder("ord_too_old")!.amountRefunded).toBe(0);
-    expect(store.getEscalation(escId)!.status).toBe("rejected");
+    expect((await store.getPaymentByOrder("ord_too_old"))!.amountRefunded).toBe(
+      0,
+    );
+    expect((await store.getEscalation(escId))!.status).toBe("rejected");
   });
 
-  test("nonexistent escalation returns ok=false", () => {
-    const resolved = resolveEscalation(store, {
+  test("nonexistent escalation returns ok=false", async () => {
+    const resolved = await resolveEscalation(store, {
       escalationId: "esc_does_not_exist",
       decision: "approve",
       resolvedBy: "mgr_x",
@@ -1052,8 +1062,8 @@ describe("resolveEscalation", () => {
     expect(resolved.message).toContain("not found");
   });
 
-  test("cannot resolve the same escalation twice after reject", () => {
-    const issued = issueRefund(
+  test("cannot resolve the same escalation twice after reject", async () => {
+    const issued = await issueRefund(
       store,
       {
         orderId: "ord_too_old",
@@ -1065,29 +1075,31 @@ describe("resolveEscalation", () => {
     );
     const escId = issued.escalation!.id;
 
-    resolveEscalation(store, {
+    await resolveEscalation(store, {
       escalationId: escId,
       decision: "reject",
       resolvedBy: "mgr_a",
     });
 
-    const second = resolveEscalation(store, {
+    const second = await resolveEscalation(store, {
       escalationId: escId,
       decision: "approve",
       resolvedBy: "mgr_b",
     });
     expect(second.ok).toBe(false);
-    expect(store.getPaymentByOrder("ord_too_old")!.amountRefunded).toBe(0);
+    expect((await store.getPaymentByOrder("ord_too_old"))!.amountRefunded).toBe(
+      0,
+    );
   });
 
-  test("approve blocked (not auto-closed) when remaining balance insufficient while pending", () => {
-    installFixture(store, {
+  test("approve blocked (not auto-closed) when remaining balance insufficient while pending", async () => {
+    await installFixture(store, {
       orderId: "ord_race_balance",
       payment: { amountPaid: 100, amountRefunded: 0 },
       customer: { id: "cust_race", riskScore: 90 },
     });
 
-    const issued = issueRefund(
+    const issued = await issueRefund(
       store,
       {
         orderId: "ord_race_balance",
@@ -1100,7 +1112,7 @@ describe("resolveEscalation", () => {
     expect(issued.outcome).toBe("escalated");
     const escId = issued.escalation!.id;
 
-    store.recordCompletedRefund({
+    await store.recordCompletedRefund({
       orderId: "ord_race_balance",
       paymentId: `pay_ord_race_balance`,
       amount: 50,
@@ -1109,13 +1121,10 @@ describe("resolveEscalation", () => {
       autoApproved: true,
       escalationId: null,
     });
-    // remaining = 50, escalation wants 80
 
-    // Clear risk so only not_over_paid (and not risk) blocks if we only cared about risk —
-    // full re-check should still fail on balance.
-    store.customers.get("cust_race")!.riskScore = 10;
+    await store.updateCustomerRisk("cust_race", 10);
 
-    const resolved = resolveEscalation(
+    const resolved = await resolveEscalation(
       store,
       {
         escalationId: escId,
@@ -1127,21 +1136,21 @@ describe("resolveEscalation", () => {
 
     expect(resolved.ok).toBe(false);
     expect(resolved.refund).toBeNull();
-    expect(store.getEscalation(escId)!.status).toBe("pending");
+    expect((await store.getEscalation(escId))!.status).toBe("pending");
     expect(failedCodes(resolved.eligibility!)).toContain("not_over_paid");
-    expect(store.getPaymentByOrder("ord_race_balance")!.amountRefunded).toBe(
-      50,
-    );
+    expect(
+      (await store.getPaymentByOrder("ord_race_balance"))!.amountRefunded,
+    ).toBe(50);
   });
 
-  test("approve blocked when a duplicate refund appeared while pending", () => {
-    installFixture(store, {
+  test("approve blocked when a duplicate refund appeared while pending", async () => {
+    await installFixture(store, {
       orderId: "ord_race_dupe",
       payment: { amountPaid: 100, amountRefunded: 0 },
       customer: { id: "cust_dupe", riskScore: 95 },
     });
 
-    const issued = issueRefund(
+    const issued = await issueRefund(
       store,
       {
         orderId: "ord_race_dupe",
@@ -1154,7 +1163,7 @@ describe("resolveEscalation", () => {
     expect(issued.outcome).toBe("escalated");
     const escId = issued.escalation!.id;
 
-    store.recordCompletedRefund({
+    await store.recordCompletedRefund({
       orderId: "ord_race_dupe",
       paymentId: "pay_ord_race_dupe",
       amount: 40,
@@ -1164,9 +1173,9 @@ describe("resolveEscalation", () => {
       escalationId: null,
     });
 
-    store.customers.get("cust_dupe")!.riskScore = 10;
+    await store.updateCustomerRisk("cust_dupe", 10);
 
-    const resolved = resolveEscalation(
+    const resolved = await resolveEscalation(
       store,
       {
         escalationId: escId,
@@ -1178,49 +1187,15 @@ describe("resolveEscalation", () => {
 
     expect(resolved.ok).toBe(false);
     expect(resolved.refund).toBeNull();
-    expect(store.getEscalation(escId)!.status).toBe("pending");
+    expect((await store.getEscalation(escId))!.status).toBe("pending");
     expect(failedCodes(resolved.eligibility!)).toContain("no_duplicate_refund");
-    // Only the intervening $40, not a second $40
-    expect(store.getPaymentByOrder("ord_race_dupe")!.amountRefunded).toBe(40);
+    expect(
+      (await store.getPaymentByOrder("ord_race_dupe"))!.amountRefunded,
+    ).toBe(40);
   });
 
-  test("approve blocked when payment record disappeared", () => {
-    installFixture(store, {
-      orderId: "ord_pay_gone",
-      customer: { id: "cust_gone", riskScore: 99 },
-    });
-    const issued = issueRefund(
-      store,
-      {
-        orderId: "ord_pay_gone",
-        amount: 20,
-        action: "gone",
-        reason: "escalate",
-      },
-      NOW,
-    );
-    const escId = issued.escalation!.id;
-    store.payments.delete("pay_ord_pay_gone");
-
-    const resolved = resolveEscalation(
-      store,
-      {
-        escalationId: escId,
-        decision: "approve",
-        resolvedBy: "mgr",
-      },
-      NOW,
-    );
-    expect(resolved.ok).toBe(false);
-    expect(resolved.refund).toBeNull();
-    expect(store.getEscalation(escId)!.status).toBe("pending");
-    // Full re-check surfaces missing payment / related checks
-    expect(resolved.eligibility).not.toBeNull();
-    expect(resolved.eligibility!.eligibleForAutoRefund).toBe(false);
-  });
-
-  test("approve still blocked for chargeback even if manager approves", () => {
-    const issued = issueRefund(
+  test("approve still blocked for chargeback even if manager approves", async () => {
+    const issued = await issueRefund(
       store,
       {
         orderId: "ord_chargeback",
@@ -1233,7 +1208,7 @@ describe("resolveEscalation", () => {
     expect(issued.outcome).toBe("escalated");
     const escId = issued.escalation!.id;
 
-    const resolved = resolveEscalation(
+    const resolved = await resolveEscalation(
       store,
       {
         escalationId: escId,
@@ -1248,7 +1223,76 @@ describe("resolveEscalation", () => {
     expect(failedCodes(resolved.eligibility!)).toContain(
       "no_chargeback_or_dispute",
     );
-    expect(store.getPaymentByOrder("ord_chargeback")!.amountRefunded).toBe(0);
-    expect(store.getEscalation(escId)!.status).toBe("pending");
+    expect(
+      (await store.getPaymentByOrder("ord_chargeback"))!.amountRefunded,
+    ).toBe(0);
+    expect((await store.getEscalation(escId))!.status).toBe("pending");
+  });
+});
+
+describe("assertWriteToken", () => {
+  const original = process.env.WRITE_TOKEN;
+
+  test("rejects when WRITE_TOKEN env is missing", () => {
+    delete process.env.WRITE_TOKEN;
+    const result = assertWriteToken("anything");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("not configured");
+    process.env.WRITE_TOKEN = original;
+  });
+
+  test("rejects missing token", () => {
+    process.env.WRITE_TOKEN = "secret-test-token-abc";
+    expect(assertWriteToken(undefined).ok).toBe(false);
+    expect(assertWriteToken("").ok).toBe(false);
+    process.env.WRITE_TOKEN = original;
+  });
+
+  test("rejects wrong token", () => {
+    process.env.WRITE_TOKEN = "secret-test-token-abc";
+    const result = assertWriteToken("wrong");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain("invalid");
+    process.env.WRITE_TOKEN = original;
+  });
+
+  test("accepts matching token", () => {
+    process.env.WRITE_TOKEN = "secret-test-token-abc";
+    expect(assertWriteToken("secret-test-token-abc").ok).toBe(true);
+    process.env.WRITE_TOKEN = original;
+  });
+});
+
+describe("store.reset seed catalog", () => {
+  test("reset restores seed counts and pre-seeded refunds", async () => {
+    const store = await freshStore();
+    await issueRefund(
+      store,
+      {
+        orderId: "ord_auto_ok",
+        amount: 89,
+        action: "full_refund_damaged",
+        reason: "temp",
+      },
+      NOW,
+    );
+    expect(
+      (await store.getPaymentByOrder("ord_auto_ok"))!.amountRefunded,
+    ).toBe(89);
+
+    await store.reset(NOW);
+    const counts = await store.counts();
+    expect(counts.customers).toBe(3);
+    expect(counts.orders).toBe(8);
+    expect(counts.payments).toBe(8);
+    expect(counts.shipments).toBe(8);
+    expect(counts.refunds).toBe(2);
+    expect(counts.escalations).toBe(0);
+    expect(
+      (await store.getPaymentByOrder("ord_auto_ok"))!.amountRefunded,
+    ).toBe(0);
+    expect(
+      (await store.getPaymentByOrder("ord_already_refunded"))!.amountRefunded,
+    ).toBe(79);
   });
 });

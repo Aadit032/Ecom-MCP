@@ -63,7 +63,7 @@ export interface Refund {
   orderId: string;
   paymentId: string;
   amount: number;
-  /** Stable key for "same eligible action" de-duplication. */
+  /** Audit/escalation label. Idempotency uses (paymentId, amount), not action. */
   action: string;
   reason: string;
   status: RefundStatus;

@@ -1,9 +1,10 @@
 /**
  * McpServer factory for the Streamable HTTP entry.
- * Tools register against the process-wide synthetic store.
+ * Tools register against the process-wide Postgres-backed store.
  */
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { assertWriteToken } from "./auth.ts";
 import { checkEligibility, issueRefund, resolveEscalation } from "./policy.ts";
 import { SEED_SCENARIOS } from "./seed.ts";
 import { store } from "./store.ts";
@@ -17,6 +18,7 @@ import {
   lookupOrderInput,
   lookupPaymentInput,
   lookupShipmentInput,
+  resetSeedDataInput,
   resolveEscalationInput,
 } from "./tool-schemas.ts";
 import { POLICY } from "./types.ts";
@@ -39,6 +41,10 @@ function errorResult(message: string) {
   };
 }
 
+function unauthorized(result: { ok: false; message: string }) {
+  return errorResult(result.message);
+}
+
 /** Build a fully configured refund-copilot MCP server instance. */
 export function createRefundMcpServer(): McpServer {
   const server = new McpServer({
@@ -46,16 +52,19 @@ export function createRefundMcpServer(): McpServer {
     version: SERVER_VERSION,
   });
 
-  // ─── Demo / test utility ───────────────────────────────────────────────────
+  // ─── Demo / test utility (write — requires token) ──────────────────────────
 
   server.registerTool("reset_seed_data",
     {
       title: "Reset seed data",
-      description: `Reset the in-memory store to the original synthetic seed catalog.
+      description: `Reset the Postgres store to the original synthetic seed catalog.
 
 Use this between MCP client test runs so refunds, escalations, and payment balances match the documented scenarios again — without restarting the server process.
 
-Destructive for demo state only: clears all runtime refunds/escalations and reloads seed customers, orders, payments, shipments, and pre-seeded refunds.`,
+Destructive for demo state only: clears all runtime refunds/escalations and reloads seed customers, orders, payments, shipments, and pre-seeded refunds.
+
+Requires the write secret token (WRITE_TOKEN).`,
+      inputSchema: resetSeedDataInput,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -75,20 +84,17 @@ Destructive for demo state only: clears all runtime refunds/escalations and relo
         }),
       }),
     },
-    async () => {
-      store.reset();
+    async ({ token }) => {
+      const auth = assertWriteToken(token);
+      if (!auth.ok) return unauthorized(auth);
+
+      await store.reset();
+      const counts = await store.counts();
       const output = {
         ok: true as const,
         message:
           "Store reset to synthetic seed catalog. Seed scenarios match list_seed_scenarios again.",
-        counts: {
-          customers: store.customers.size,
-          orders: store.orders.size,
-          payments: store.payments.size,
-          shipments: store.shipments.size,
-          refunds: store.refunds.size,
-          escalations: store.escalations.size,
-        },
+        counts,
       };
       return jsonResult(output);
     },
@@ -99,7 +105,8 @@ Destructive for demo state only: clears all runtime refunds/escalations and relo
   server.registerTool("list_seed_scenarios",
     {
       title: "List seed scenarios",
-      description: "List synthetic seed orders and the expected issue_refund outcome for each scenario. Use this to discover order IDs while investigating.",
+      description:
+        "List synthetic seed orders and the expected issue_refund outcome for each scenario. Use this to discover order IDs while investigating.",
       annotations: { readOnlyHint: true, openWorldHint: false },
       outputSchema: z.object({
         policy: z.object({
@@ -133,20 +140,22 @@ Destructive for demo state only: clears all runtime refunds/escalations and relo
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
-      const orders = store.listOrders().map((order) => {
-        const c = store.getCustomer(order.customerId);
-        return {
-          order,
-          customer: c
-            ? {
-                id: c.id,
-                name: c.name,
-                email: c.email,
-                riskScore: c.riskScore,
-              }
-            : null,
-        };
-      });
+      const orders = await Promise.all(
+        (await store.listOrders()).map(async (order) => {
+          const c = await store.getCustomer(order.customerId);
+          return {
+            order,
+            customer: c
+              ? {
+                  id: c.id,
+                  name: c.name,
+                  email: c.email,
+                  riskScore: c.riskScore,
+                }
+              : null,
+          };
+        }),
+      );
       return jsonResult({ count: orders.length, orders });
     },
   );
@@ -154,14 +163,15 @@ Destructive for demo state only: clears all runtime refunds/escalations and relo
   server.registerTool("lookup_order",
     {
       title: "Lookup order",
-      description:"Look up a synthetic order by order ID, including linked customer summary.",
+      description:
+        "Look up a synthetic order by order ID, including linked customer summary.",
       inputSchema: lookupOrderInput,
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ orderId }) => {
-      const order = store.getOrder(orderId);
+      const order = await store.getOrder(orderId);
       if (!order) return errorResult(`Order not found: ${orderId}`);
-      const customer = store.getCustomer(order.customerId) ?? null;
+      const customer = (await store.getCustomer(order.customerId)) ?? null;
       return jsonResult({ order, customer });
     },
   );
@@ -179,8 +189,8 @@ Destructive for demo state only: clears all runtime refunds/escalations and relo
         return errorResult("Provide paymentId or orderId.");
       }
       const payment = paymentId
-        ? store.getPayment(paymentId)
-        : store.getPaymentByOrder(orderId!);
+        ? await store.getPayment(paymentId)
+        : await store.getPaymentByOrder(orderId!);
       if (!payment) {
         return errorResult(
           `Payment not found${paymentId ? `: ${paymentId}` : ` for order ${orderId}`}.`,
@@ -205,8 +215,8 @@ Destructive for demo state only: clears all runtime refunds/escalations and relo
         return errorResult("Provide shipmentId or orderId.");
       }
       const shipment = shipmentId
-        ? store.getShipment(shipmentId)
-        : store.getShipmentByOrder(orderId!);
+        ? await store.getShipment(shipmentId)
+        : await store.getShipmentByOrder(orderId!);
       if (!shipment) {
         return errorResult(
           `Shipment not found${shipmentId ? `: ${shipmentId}` : ` for order ${orderId}`}.`,
@@ -225,7 +235,7 @@ Destructive for demo state only: clears all runtime refunds/escalations and relo
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ customerId }) => {
-      const customer = store.getCustomer(customerId);
+      const customer = await store.getCustomer(customerId);
       if (!customer) return errorResult(`Customer not found: ${customerId}`);
       return jsonResult({ customer });
     },
@@ -240,11 +250,11 @@ Destructive for demo state only: clears all runtime refunds/escalations and relo
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ orderId }) => {
-      if (!store.getOrder(orderId))
+      if (!(await store.getOrder(orderId)))
         return errorResult(`Order not found: ${orderId}`);
       return jsonResult({
         orderId,
-        refunds: store.listRefundsForOrder(orderId),
+        refunds: await store.listRefundsForOrder(orderId),
       });
     },
   );
@@ -262,7 +272,7 @@ Auto-execute requires ALL of:
 - order age ≤ ${POLICY.maxOrderAgeDays} days
 - customer risk < ${POLICY.maxCustomerRiskExclusive}
 - verified carrier exception present
-- no completed refund for the same action + amount
+- no completed refund for the same paymentId + amount (idempotency key)
 - payment captured with no chargeback/dispute flags
 
 If any check fails, issue_refund will escalate for manager approval instead of refunding.`,
@@ -270,7 +280,11 @@ If any check fails, issue_refund will escalate for manager approval instead of r
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ orderId, amount, action }) => {
-      const eligibility = checkEligibility(store, { orderId, amount, action });
+      const eligibility = await checkEligibility(store, {
+        orderId,
+        amount,
+        action,
+      });
       return jsonResult(eligibility);
     },
   );
@@ -282,23 +296,34 @@ If any check fails, issue_refund will escalate for manager approval instead of r
       title: "Issue refund (guarded)",
       description: `Attempt a refund under the auto-approval policy.
 
+Requires the write secret token (WRITE_TOKEN).
+
 Behavior:
 - If ALL policy checks pass → auto-execute the refund (money moves).
 - If ANY policy check fails → create a manager-approval escalation and move NO money.
   Failed checks never complete the refund via mid-call human confirmation/elicitation.
   Escalation is tracking only — it does not authorize a later policy bypass.
+- Idempotent on (paymentId, amount): retries return the same completed refund without double-paying.
 
 Use check_refund_eligibility first for investigation. Use resolve_escalation to reject, or to approve only after conditions clear (full policy re-check at execution time).`,
       inputSchema: issueRefundInput,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
-        idempotentHint: false,
+        idempotentHint: true,
         openWorldHint: false,
       },
     },
-    async ({ orderId, amount, action, reason }) => {
-      const result = issueRefund(store, { orderId, amount, action, reason });
+    async ({ token, orderId, amount, action, reason }) => {
+      const auth = assertWriteToken(token);
+      if (!auth.ok) return unauthorized(auth);
+
+      const result = await issueRefund(store, {
+        orderId,
+        amount,
+        action,
+        reason,
+      });
       return jsonResult(result);
     },
   );
@@ -314,7 +339,7 @@ Use check_refund_eligibility first for investigation. Use resolve_escalation to 
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ status }) => {
-      return jsonResult({ escalations: store.listEscalations(status) });
+      return jsonResult({ escalations: await store.listEscalations(status) });
     },
   );
 
@@ -327,7 +352,7 @@ Use check_refund_eligibility first for investigation. Use resolve_escalation to 
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ escalationId }) => {
-      const escalation = store.getEscalation(escalationId);
+      const escalation = await store.getEscalation(escalationId);
       if (!escalation)
         return errorResult(`Escalation not found: ${escalationId}`);
       return jsonResult({ escalation });
@@ -338,6 +363,8 @@ Use check_refund_eligibility first for investigation. Use resolve_escalation to 
     {
       title: "Resolve escalation (manager)",
       description: `Manager decision on a pending escalation.
+
+Requires the write secret token (WRITE_TOKEN).
 
 - reject: close the escalation without moving money.
 - approve: re-run the FULL auto-refund policy at execution time. Money moves only if every check passes now (same gates as check_refund_eligibility / issue_refund auto path).
@@ -351,8 +378,11 @@ An escalation is NOT authorization to bypass a failed policy check. If checks st
         openWorldHint: false,
       },
     },
-    async ({ escalationId, decision, resolvedBy, note }) => {
-      const result = resolveEscalation(store, {
+    async ({ token, escalationId, decision, resolvedBy, note }) => {
+      const auth = assertWriteToken(token);
+      if (!auth.ok) return unauthorized(auth);
+
+      const result = await resolveEscalation(store, {
         escalationId,
         decision,
         resolvedBy,

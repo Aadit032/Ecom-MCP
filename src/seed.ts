@@ -366,7 +366,7 @@ export const SEED_SCENARIOS = [
   },
   {
     orderId: "ord_already_refunded",
-    scenario: "Duplicate refund for same action+amount",
+    scenario: "Duplicate refund for same paymentId+amount (idempotency key)",
     expected: "escalated",
   },
   {
